@@ -18,6 +18,7 @@
 
 using Eto.Drawing;
 using Eto.Forms;
+using System.Linq;
 using SmartHopper.Infrastructure.AIProviders;
 using SmartHopper.Menu.Dialogs.SettingsTabs.Models;
 
@@ -28,6 +29,8 @@ namespace SmartHopper.Menu.Dialogs.SettingsTabs
     /// </summary>
     public class AssistantSettingsPage : Panel
     {
+        public const string CodexAccountProviderName = "Codex Account";
+
         private readonly DropDown _assistantProviderComboBox;
 
         private readonly TextBox _assistantModelTextBox;
@@ -65,6 +68,10 @@ namespace SmartHopper.Menu.Dialogs.SettingsTabs
 
             // Populate provider dropdown
             this._assistantProviderComboBox.Items.Add(new ListItem { Text = "(Default)" });
+            if (!this._providers.Any(provider => provider.Name == CodexAccountProviderName))
+            {
+                this._assistantProviderComboBox.Items.Add(new ListItem { Text = CodexAccountProviderName });
+            }
             foreach (var provider in this._providers)
             {
                 this._assistantProviderComboBox.Items.Add(new ListItem { Text = provider.Name });

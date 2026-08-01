@@ -40,7 +40,9 @@ using SmartHopper.Infrastructure.AICall.Core.Returns;
 using SmartHopper.Infrastructure.AICall.Metrics;
 using SmartHopper.Infrastructure.AICall.Sessions;
 using SmartHopper.Infrastructure.AICall.Utilities;
+using SmartHopper.Infrastructure.Authentication.Codex;
 using SmartHopper.Infrastructure.Diagnostics;
+using SmartHopper.Infrastructure.Settings;
 using SmartHopper.Infrastructure.Streaming;
 
 namespace SmartHopper.Core.UI.Chat
@@ -60,9 +62,14 @@ namespace SmartHopper.Core.UI.Chat
         private readonly HtmlChatRenderer _htmlRenderer = new HtmlChatRenderer();
         private bool _webViewInitialized;
         private TaskCompletionSource<bool> _webViewInitializedTcs = new TaskCompletionSource<bool>();
-        private ConversationSession _currentSession = null!;
+        private IConversationSession _currentSession = null!;
         private System.Threading.CancellationTokenSource? _currentCts;
         private string? _pendingUserMessage;
+        private DropDown? _codexModelDropDown;
+        private DropDown? _codexReasoningDropDown;
+        private Label? _codexConfigurationStatus;
+        private IReadOnlyList<CodexModelOption> _codexModels = Array.Empty<CodexModelOption>();
+        private bool _updatingCodexSelectors;
 
         // Keeps last-rendered HTML per DOM key to make upserts idempotent and avoid redundant DOM work
         // Uses LRU eviction to prevent unbounded growth in long conversations
@@ -130,7 +137,11 @@ namespace SmartHopper.Core.UI.Chat
         /// <param name="request">The initial AI request used to seed the conversation session.</param>
         /// <param name="progressReporter">Optional progress callback for reporting UI status.</param>
         /// <param name="generateGreeting">When true, the dialog requests the session to emit an initial greeting (if enabled in settings).</param>
-        internal WebChatDialog(AIRequestCall request, Action<string>? progressReporter, bool generateGreeting = false)
+        internal WebChatDialog(
+            AIRequestCall request,
+            Action<string>? progressReporter,
+            bool generateGreeting = false,
+            Func<IConversationObserver, IConversationSession>? sessionFactory = null)
         {
             try
             {
@@ -144,18 +155,32 @@ namespace SmartHopper.Core.UI.Chat
                 }
 
                 // Create session with attached observer from the start
-                this._currentSession = new ConversationSession(request, new WebChatObserver(this), generateGreeting: this._generateGreeting);
+                var observer = new WebChatObserver(this);
+                this._currentSession = sessionFactory != null
+                    ? sessionFactory(observer)
+                    : new ConversationSession(request, observer, generateGreeting: this._generateGreeting);
 
                 // Window basics
                 this.ClientSize = new Size(720, 640);
                 this.MinimumSize = new Size(560, 420);
                 this.Padding = new Padding(6);
 
-                // WebView-only content
+                // 대화 본문과 Codex 전용 실행 옵션을 구성합니다.
                 this._webView = new WebView();
                 this._webView.DocumentLoaded += this.WebView_DocumentLoaded;
                 this._webView.DocumentLoading += this.WebView_DocumentLoading;
-                this.Content = this._webView;
+                if (this._currentSession is ICodexConfigurableConversationSession codexSession)
+                {
+                    var content = new DynamicLayout { Spacing = new Size(0, 6) };
+                    content.Add(this.CreateCodexConfigurationPanel(), yscale: false);
+                    content.Add(this._webView, yscale: true);
+                    this.Content = content;
+                    _ = this.LoadCodexConfigurationAsync(codexSession);
+                }
+                else
+                {
+                    this.Content = this._webView;
+                }
 
                 // If the user drags/resizes the dialog while we are rendering/upserting messages,
                 // defer DOM work to keep Rhino/Eto responsive.
@@ -172,6 +197,243 @@ namespace SmartHopper.Core.UI.Chat
             {
                 DebugLog($"[WebChatDialog] Constructor error: {ex.Message}");
             }
+        }
+
+        private Control CreateCodexConfigurationPanel()
+        {
+            this._codexModelDropDown = new DropDown { Enabled = false };
+            this._codexModelDropDown.Items.Add(new ListItem { Text = "모델 불러오는 중...", Key = string.Empty });
+            this._codexModelDropDown.SelectedIndex = 0;
+            this._codexModelDropDown.SelectedIndexChanged += (_, __) => this.OnCodexModelChanged();
+
+            this._codexReasoningDropDown = new DropDown { Enabled = false };
+            this._codexReasoningDropDown.Items.Add(new ListItem { Text = "추론 수준 불러오는 중...", Key = string.Empty });
+            this._codexReasoningDropDown.SelectedIndex = 0;
+            this._codexReasoningDropDown.SelectedIndexChanged += (_, __) => this.ApplyCodexConfiguration();
+
+            this._codexConfigurationStatus = new Label
+            {
+                Text = "Codex 모델 목록을 불러오는 중입니다.",
+                TextColor = Colors.Gray,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+
+            var selectors = new TableLayout
+            {
+                Spacing = new Size(8, 4),
+                Rows =
+                {
+                    new TableRow(
+                        new Label { Text = "모델", VerticalAlignment = VerticalAlignment.Center },
+                        new TableCell(this._codexModelDropDown, true),
+                        new Label { Text = "추론 수준", VerticalAlignment = VerticalAlignment.Center },
+                        new TableCell(this._codexReasoningDropDown, true)),
+                },
+            };
+
+            var panelLayout = new DynamicLayout { Spacing = new Size(0, 4) };
+            panelLayout.Add(selectors, yscale: false);
+            panelLayout.Add(this._codexConfigurationStatus, yscale: false);
+
+            return new Panel
+            {
+                Padding = new Padding(10, 7),
+                BackgroundColor = Color.FromArgb(245, 247, 250),
+                Content = panelLayout,
+            };
+        }
+
+        private async Task LoadCodexConfigurationAsync(ICodexConfigurableConversationSession session)
+        {
+            try
+            {
+                var models = await session.GetModelsAsync().ConfigureAwait(false);
+                RhinoApp.InvokeOnUiThread(() => this.PopulateCodexModels(session, models));
+            }
+            catch (Exception ex)
+            {
+                DebugLog($"[WebChatDialog] Codex model list error: {ex.Message}");
+                RhinoApp.InvokeOnUiThread(() =>
+                {
+                    if (this._codexConfigurationStatus != null)
+                    {
+                        this._codexConfigurationStatus.Text = "모델 목록을 불러오지 못했습니다. 기본 설정으로 대화할 수 있습니다.";
+                    }
+                });
+            }
+        }
+
+        private void PopulateCodexModels(
+            ICodexConfigurableConversationSession session,
+            IReadOnlyList<CodexModelOption> models)
+        {
+            if (this._codexModelDropDown == null || this._codexReasoningDropDown == null)
+            {
+                return;
+            }
+
+            this._updatingCodexSelectors = true;
+            try
+            {
+                this._codexModels = models;
+                this._codexModelDropDown.Items.Clear();
+                foreach (var model in models)
+                {
+                    var suffix = model.IsDefault ? " · 기본" : string.Empty;
+                    this._codexModelDropDown.Items.Add(new ListItem
+                    {
+                        Text = $"{model.DisplayName}{suffix}",
+                        Key = model.Model,
+                    });
+                }
+
+                var savedModel = SmartHopperSettings.Instance.SmartHopperAssistant?.CodexModel;
+                var selectedModel = models.FirstOrDefault(item =>
+                        string.Equals(item.Model, savedModel, StringComparison.OrdinalIgnoreCase))
+                    ?? models.FirstOrDefault(item =>
+                        string.Equals(item.Model, session.SelectedModel, StringComparison.OrdinalIgnoreCase))
+                    ?? models.FirstOrDefault(item => item.IsDefault)
+                    ?? models.FirstOrDefault();
+
+                if (selectedModel == null)
+                {
+                    this._codexModelDropDown.Items.Add(new ListItem { Text = "사용 가능한 모델 없음", Key = string.Empty });
+                    this._codexModelDropDown.SelectedIndex = 0;
+                    this._codexConfigurationStatus!.Text = "현재 계정에서 사용할 수 있는 Codex 모델이 없습니다.";
+                    return;
+                }
+
+                this.SelectDropDownKey(this._codexModelDropDown, selectedModel.Model);
+                var savedEffort = SmartHopperSettings.Instance.SmartHopperAssistant?.CodexReasoningEffort;
+                this.PopulateCodexReasoningOptions(
+                    selectedModel,
+                    string.IsNullOrWhiteSpace(savedEffort) ? session.SelectedReasoningEffort : savedEffort);
+                this._codexModelDropDown.Enabled = true;
+                this._codexReasoningDropDown.Enabled = selectedModel.SupportedReasoningEfforts.Count > 0;
+                this._codexConfigurationStatus!.Text = "선택값은 Canvas Assistant와 기본 AI 컴포넌트에 적용됩니다.";
+                session.Configure(
+                    selectedModel.Model,
+                    this._codexReasoningDropDown.SelectedKey);
+                this.SaveCodexConfiguration(selectedModel.Model, this._codexReasoningDropDown.SelectedKey);
+            }
+            finally
+            {
+                this._updatingCodexSelectors = false;
+            }
+        }
+
+        private void OnCodexModelChanged()
+        {
+            if (this._updatingCodexSelectors || this._codexModelDropDown == null)
+            {
+                return;
+            }
+
+            var model = this._codexModels.FirstOrDefault(item =>
+                string.Equals(item.Model, this._codexModelDropDown.SelectedKey, StringComparison.Ordinal));
+            if (model == null)
+            {
+                return;
+            }
+
+            this._updatingCodexSelectors = true;
+            try
+            {
+                this.PopulateCodexReasoningOptions(model, model.DefaultReasoningEffort);
+                if (this._codexReasoningDropDown != null)
+                {
+                    this._codexReasoningDropDown.Enabled = model.SupportedReasoningEfforts.Count > 0;
+                }
+            }
+            finally
+            {
+                this._updatingCodexSelectors = false;
+            }
+
+            this.ApplyCodexConfiguration();
+        }
+
+        private void PopulateCodexReasoningOptions(CodexModelOption model, string selectedEffort)
+        {
+            if (this._codexReasoningDropDown == null)
+            {
+                return;
+            }
+
+            this._codexReasoningDropDown.Items.Clear();
+            foreach (var effort in model.SupportedReasoningEfforts)
+            {
+                this._codexReasoningDropDown.Items.Add(new ListItem
+                {
+                    Text = $"{ToReasoningLabel(effort.Value)} ({effort.Value})",
+                    Key = effort.Value,
+                });
+            }
+
+            var effortToSelect = model.SupportedReasoningEfforts.Any(item =>
+                    string.Equals(item.Value, selectedEffort, StringComparison.OrdinalIgnoreCase))
+                ? selectedEffort
+                : model.DefaultReasoningEffort;
+            this.SelectDropDownKey(this._codexReasoningDropDown, effortToSelect);
+            if (this._codexReasoningDropDown.SelectedIndex < 0 && this._codexReasoningDropDown.Items.Count > 0)
+            {
+                this._codexReasoningDropDown.SelectedIndex = 0;
+            }
+        }
+
+        private void ApplyCodexConfiguration()
+        {
+            if (this._updatingCodexSelectors ||
+                this._currentSession is not ICodexConfigurableConversationSession session ||
+                this._codexModelDropDown == null ||
+                this._codexReasoningDropDown == null)
+            {
+                return;
+            }
+
+            session.Configure(this._codexModelDropDown.SelectedKey, this._codexReasoningDropDown.SelectedKey);
+            this.SaveCodexConfiguration(this._codexModelDropDown.SelectedKey, this._codexReasoningDropDown.SelectedKey);
+        }
+
+        private void SaveCodexConfiguration(string? model, string? reasoningEffort)
+        {
+            var settings = SmartHopperSettings.Instance;
+            var assistant = settings.SmartHopperAssistant ??= new SmartHopperAssistantSettings();
+            assistant.AssistantProvider = "Codex Account";
+            assistant.AssistantModel = model?.Trim() ?? string.Empty;
+            assistant.CodexModel = model?.Trim() ?? string.Empty;
+            assistant.CodexReasoningEffort = reasoningEffort?.Trim() ?? string.Empty;
+            settings.DefaultAIProvider = "Codex Account";
+            settings.Save();
+        }
+
+        private void SelectDropDownKey(DropDown dropDown, string? key)
+        {
+            dropDown.SelectedIndex = -1;
+            for (var index = 0; index < dropDown.Items.Count; index++)
+            {
+                if (string.Equals(dropDown.Items[index].Key, key, StringComparison.OrdinalIgnoreCase))
+                {
+                    dropDown.SelectedIndex = index;
+                    return;
+                }
+            }
+        }
+
+        private static string ToReasoningLabel(string value)
+        {
+            return value.ToLowerInvariant() switch
+            {
+                "none" => "없음",
+                "minimal" => "최소",
+                "low" => "낮음",
+                "medium" => "보통",
+                "high" => "높음",
+                "xhigh" => "매우 높음",
+                "max" => "최대",
+                "ultra" => "울트라",
+                _ => value,
+            };
         }
 
         /// <summary>
@@ -1348,6 +1610,7 @@ namespace SmartHopper.Core.UI.Chat
             try
             {
                 this._currentCts?.Cancel();
+                this._currentSession?.Cancel();
                 DebugLog("[WebChatDialog] Cancellation requested");
             }
             catch (Exception ex)
@@ -1365,6 +1628,10 @@ namespace SmartHopper.Core.UI.Chat
             {
                 DebugLog("[WebChatDialog] Dialog closing, cancelling ongoing AI calls");
                 this.CancelChat();
+                if (this._currentSession is IDisposable disposableSession)
+                {
+                    disposableSession.Dispose();
+                }
             }
             catch (Exception ex)
             {

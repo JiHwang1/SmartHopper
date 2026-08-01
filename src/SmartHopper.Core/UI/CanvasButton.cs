@@ -34,6 +34,7 @@ using Rhino;
 using SmartHopper.Core.UI.Chat;
 using SmartHopper.Infrastructure.AIModels;
 using SmartHopper.Infrastructure.AIProviders;
+using SmartHopper.Infrastructure.Authentication.Codex;
 using SmartHopper.Infrastructure.Dialogs;
 using SmartHopper.Infrastructure.Properties;
 using SmartHopper.Infrastructure.Settings;
@@ -659,6 +660,25 @@ namespace SmartHopper.Core.UI
                 var assistant = SmartHopperSettings.Instance?.SmartHopperAssistant;
 
                 var requestedProviderName = assistant?.AssistantProvider;
+
+                if (string.Equals(requestedProviderName, "Codex Account", StringComparison.Ordinal))
+                {
+                    var accountState = CodexAccountRuntime.Service.CurrentState;
+                    if (accountState.Status != CodexAccountStatus.SignedIn)
+                    {
+                        StyledMessageDialog.ShowError(
+                            "SmartHopper 설정의 Codex Account 탭에서 ChatGPT 로그인을 먼저 완료하세요.",
+                            "SmartHopper Assistant");
+                        return;
+                    }
+
+                    WebChatUtils.EnsureCodexDialogOpen(
+                        string.IsNullOrWhiteSpace(assistant?.CodexModel) ? assistant?.AssistantModel ?? string.Empty : assistant.CodexModel,
+                        assistant?.CodexReasoningEffort ?? string.Empty,
+                        DefaultSystemPrompt + "\n\nThis Codex integration can read the supplied Grasshopper context but does not expose SmartHopper canvas mutation tools. Never claim that you changed the canvas.",
+                        CanvasChatDialogId);
+                    return;
+                }
 
                 // Treat "(Default)" as request to use configured default provider
                 var isDefaultProviderSelected = string.Equals(requestedProviderName, "(Default)", StringComparison.Ordinal);

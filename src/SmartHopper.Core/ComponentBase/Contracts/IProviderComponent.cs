@@ -48,6 +48,6 @@ namespace SmartHopper.Core.ComponentBase.Contracts
         /// Gets the currently selected AI provider instance.
         /// </summary>
         /// <returns>The AI provider instance, or null if not available.</returns>
-        AIProvider GetActualAIProvider();
+        IAIProvider GetActualAIProvider();
     }
 }

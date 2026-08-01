@@ -72,7 +72,7 @@ namespace SmartHopper.Core.ComponentBase
         public string GetActualAIProviderName() => this.providerCore.GetActualProviderName();
 
         /// <inheritdoc/>
-        public AIProvider GetActualAIProvider() => this.providerCore.GetActualProvider();
+        public IAIProvider GetActualAIProvider() => this.providerCore.GetActualProvider();
 
         /// <summary>
         /// Creates the custom attributes for this component, which includes the provider logo badge.

@@ -30,6 +30,7 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading.Tasks;
 using Rhino;
+using SmartHopper.Infrastructure.Authentication.Codex;
 using SmartHopper.Infrastructure.Dialogs;
 using SmartHopper.Infrastructure.Settings;
 using SmartHopper.Infrastructure.Utils;
@@ -57,6 +58,10 @@ namespace SmartHopper.Infrastructure.AIProviders
         {
             // NOTE: Do NOT automatically call RefreshProviders() here to avoid circular dependencies
             // RefreshProviders() should be called explicitly after initialization
+            this.RegisterProvider(
+                CodexAccountProvider.Instance,
+                new CodexAccountProviderSettings(),
+                assembly: null);
         }
 
         /// <summary>

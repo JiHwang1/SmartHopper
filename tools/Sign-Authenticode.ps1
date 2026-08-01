@@ -95,8 +95,46 @@ if ($Generate) {
         }
     }
     Write-Host "Generating self-signed PFX certificate at $pfxPath" -ForegroundColor Cyan
-    $cert = New-SelfSignedCertificate -Subject "CN=SmartHopperDev" -CertStoreLocation Cert:\CurrentUser\My -KeyExportPolicy Exportable -KeySpec Signature -Type CodeSigningCert
-    Export-PfxCertificate -Cert "Cert:\CurrentUser\My\$($cert.Thumbprint)" -FilePath $pfxPath -Password $securePassword
+    try {
+        $cert = New-SelfSignedCertificate -Subject "CN=SmartHopperDev" -CertStoreLocation Cert:\CurrentUser\My -KeyExportPolicy Exportable -KeySpec Signature -Type CodeSigningCert -ErrorAction Stop
+        Export-PfxCertificate -Cert "Cert:\CurrentUser\My\$($cert.Thumbprint)" -FilePath $pfxPath -Password $securePassword -ErrorAction Stop
+    } catch {
+        # Some restricted Windows profiles cannot initialize Cert:\CurrentUser even though
+        # certificate APIs are available. Create the same code-signing certificate in memory.
+        Write-Warning "CurrentUser certificate store is unavailable; generating an in-memory code-signing certificate."
+        $rsa = [System.Security.Cryptography.RSA]::Create(2048)
+        try {
+            $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
+                "CN=SmartHopperDev",
+                $rsa,
+                [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+                [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
+            $oids = [System.Security.Cryptography.OidCollection]::new()
+            [void]$oids.Add([System.Security.Cryptography.Oid]::new("1.3.6.1.5.5.7.3.3"))
+            $request.CertificateExtensions.Add(
+                [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new($oids, $false))
+            $request.CertificateExtensions.Add(
+                [System.Security.Cryptography.X509Certificates.X509KeyUsageExtension]::new(
+                    [System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::DigitalSignature,
+                    $true))
+            $generated = $request.CreateSelfSigned([DateTimeOffset]::Now.AddMinutes(-5), [DateTimeOffset]::Now.AddYears(1))
+            try {
+                $plainPassword = if ($Password) { $Password } else {
+                    $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
+                    try { [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer) }
+                    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer) }
+                }
+                $pfxBytes = $generated.Export(
+                    [System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx,
+                    $plainPassword)
+                [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
+            } finally {
+                $generated.Dispose()
+            }
+        } finally {
+            $rsa.Dispose()
+        }
+    }
     Write-Host "PFX certificate created at $pfxPath" -ForegroundColor Green
 } elseif ($Base64) {
     if (-not $Password) {
@@ -251,9 +289,20 @@ if ($Generate) {
         }
     }
 
+    $fallbackCertificate = $null
     if (-not $signtoolPath) {
-        Write-Error "Could not find signtool.exe. Please ensure Windows SDK is installed."
-        exit 1
+        Write-Warning "signtool.exe was not found; using Set-AuthenticodeSignature with the PFX certificate."
+        try {
+            $keyFlags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet -bor
+                [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
+            $fallbackCertificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+                $pfxPath,
+                $plainPassword,
+                $keyFlags)
+        } catch {
+            Write-Error "Could not load the PFX certificate for PowerShell signing: $_"
+            exit 1
+        }
     }
 
     # Security: Use explicit allowlist to prevent signing unintended/malicious assemblies
@@ -312,23 +361,35 @@ if ($Generate) {
 
         foreach ($dll in $items) {
             Write-Host "Signing $($dll.FullName) with PFX file (file-based signing)..." -ForegroundColor Cyan
-            # Use file-based sign without /a to embed the certificate
-            & $signtoolPath sign /fd SHA256 /f "$pfxPath" /p "$plainPassword" $dll.FullName
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "File-based signing failed (exit code $LASTEXITCODE), falling back to store-based signing..." -ForegroundColor Yellow
-                $imported = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $securePassword
-                if (-not $imported) {
-                    Write-Error "Failed to import PFX certificate. Please verify the PFX password and that the runner has permission to import certificates."
-                    exit 1
-                }
-                $thumb = $imported.Thumbprint
-                Write-Host "Signing $($dll.FullName) with certificate thumbprint $thumb..." -ForegroundColor Cyan
-                & $signtoolPath sign /fd SHA256 /sha1 $thumb $dll.FullName
+            if ($signtoolPath) {
+                # Use file-based sign without /a to embed the certificate
+                & $signtoolPath sign /fd SHA256 /f "$pfxPath" /p "$plainPassword" $dll.FullName
                 if ($LASTEXITCODE -ne 0) {
-                    Write-Error "Fallback signing failed for $($dll.FullName)."
+                    Write-Host "File-based signing failed (exit code $LASTEXITCODE), falling back to store-based signing..." -ForegroundColor Yellow
+                    $imported = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $securePassword
+                    if (-not $imported) {
+                        Write-Error "Failed to import PFX certificate. Please verify the PFX password and that the runner has permission to import certificates."
+                        exit 1
+                    }
+                    $thumb = $imported.Thumbprint
+                    Write-Host "Signing $($dll.FullName) with certificate thumbprint $thumb..." -ForegroundColor Cyan
+                    & $signtoolPath sign /fd SHA256 /sha1 $thumb $dll.FullName
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Error "Fallback signing failed for $($dll.FullName)."
+                        exit 1
+                    }
+                }
+            } else {
+                $signature = Set-AuthenticodeSignature -FilePath $dll.FullName -Certificate $fallbackCertificate -HashAlgorithm SHA256
+                if ($signature.Status -eq [System.Management.Automation.SignatureStatus]::NotSigned) {
+                    Write-Error "PowerShell signing failed for $($dll.FullName): $($signature.StatusMessage)"
                     exit 1
                 }
             }
         }
+    }
+
+    if ($fallbackCertificate) {
+        $fallbackCertificate.Dispose()
     }
 }

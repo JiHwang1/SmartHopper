@@ -75,7 +75,7 @@ namespace SmartHopper.Core.ComponentBase
         public string GetActualAIProviderName() => this.providerCore.GetActualProviderName();
 
         /// <inheritdoc/>
-        public AIProvider GetActualAIProvider() => this.providerCore.GetActualProvider();
+        public IAIProvider GetActualAIProvider() => this.providerCore.GetActualProvider();
 
         /// <summary>
         /// Appends additional menu items to the component's context menu.

@@ -38,6 +38,18 @@ namespace SmartHopper.Infrastructure.Settings
         public string AssistantModel { get; set; } = string.Empty;
 
         /// <summary>
+        /// Canvas Assistant와 기본 Provider를 사용하는 AI 컴포넌트가 공유할 Codex 모델을 가져오거나 설정합니다.
+        /// </summary>
+        [JsonProperty]
+        public string CodexModel { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Canvas Assistant와 기본 Provider를 사용하는 AI 컴포넌트가 공유할 Codex 추론 수준을 가져오거나 설정합니다.
+        /// </summary>
+        [JsonProperty]
+        public string CodexReasoningEffort { get; set; } = string.Empty;
+
+        /// <summary>
         /// Gets or sets a value indicating whether the SmartHopper Assistant canvas button is enabled.
         /// Defaults to <see langword="true"/>.
         /// </summary>

@@ -107,6 +107,18 @@ namespace SmartHopper.Infrastructure.Settings
         public int BatchPollIntervalSeconds { get; set; } = 20;
 
         /// <summary>
+        /// Gets or sets an optional explicit Codex CLI executable path.
+        /// </summary>
+        [JsonProperty]
+        public string? CodexExecutablePath { get; set; }
+
+        /// <summary>
+        /// Gets or sets an optional CODEX_HOME used only for the managed app-server process.
+        /// </summary>
+        [JsonProperty]
+        public string? CodexHome { get; set; }
+
+        /// <summary>
         /// Gets or sets settings related to the SmartHopper assistant features.
         /// </summary>
         [JsonProperty(nameof(SmartHopperAssistant))]

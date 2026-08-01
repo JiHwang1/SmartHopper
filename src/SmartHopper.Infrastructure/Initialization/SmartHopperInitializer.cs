@@ -22,6 +22,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Threading.Tasks;
 using Rhino;
 using SmartHopper.Infrastructure.AIProviders;
+using SmartHopper.Infrastructure.Authentication.Codex;
 using SmartHopper.Infrastructure.Settings;
 using SmartHopper.Infrastructure.Utils;
 
@@ -60,6 +61,9 @@ namespace SmartHopper.Infrastructure.Initialization
                     // Step 1: Load settings first (but don't refresh providers yet)
                     var settings = SmartHopperSettings.Instance;
                     Debug.WriteLine("[SmartHopperInitializer] Settings loaded");
+
+                    // Register Codex account process cleanup without starting Codex or joining the provider registry.
+                    CodexAccountRuntime.Initialize();
 
                     var displayVersion = VersionHelper.GetDisplayVersion();
                     var fullVersion = VersionHelper.GetFullVersion();

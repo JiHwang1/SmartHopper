@@ -24,6 +24,7 @@ using Eto.Drawing;
 using Eto.Forms;
 using Rhino;
 using SmartHopper.Infrastructure.AIProviders;
+using SmartHopper.Infrastructure.Authentication.Codex;
 using SmartHopper.Infrastructure.Properties;
 using SmartHopper.Infrastructure.Settings;
 using SmartHopper.Menu.Dialogs.SettingsTabs;
@@ -46,6 +47,7 @@ namespace SmartHopper.Menu.Dialogs
         private readonly ProvidersSettingsPage _providersPage;
         private readonly AssistantSettingsPage _assistantPage;
         private readonly FallbackSettingsPage _fallbackPage;
+        private readonly CodexAccountSettingsPage _codexAccountPage;
         private readonly List<GenericProviderSettingsPage> _providerPages;
 
         // Settings models
@@ -69,8 +71,8 @@ namespace SmartHopper.Menu.Dialogs
             }
 
             this.Title = "SmartHopper Settings";
-            this.Size = new Size(600, 500);
-            this.MinimumSize = new Size(600, 400);
+            this.Size = new Size(850, 560);
+            this.MinimumSize = new Size(700, 440);
             this.Resizable = true;
             this.Padding = new Padding(10);
 
@@ -79,15 +81,12 @@ namespace SmartHopper.Menu.Dialogs
                 (int)((Screen.PrimaryScreen.Bounds.Width - this.Size.Width) / 2),
                 (int)((Screen.PrimaryScreen.Bounds.Height - this.Size.Height) / 2));
 
-            // Load settings and synchronously discover providers on Rhino's UI thread
+            // Provider 탐색은 SmartHopper 초기화 중 이미 실행됩니다. 설정창을 열 때 다시
+            // 실행하면 관련 없는 Provider의 무결성/신뢰 오류가 나타나고 Rhino UI가 멈출 수 있습니다.
             this._settings = SmartHopperSettings.Instance;
-            IAIProvider[] providers = null;
-            RhinoApp.InvokeOnUiThread(() =>
-            {
-                Infrastructure.AIProviders.ProviderManager.Instance.RefreshProviders();
-                providers = Infrastructure.AIProviders.ProviderManager.Instance.GetProviders(includeUntrusted: true).ToArray();
-            });
-            this._providers = providers;
+            this._providers = Infrastructure.AIProviders.ProviderManager.Instance
+                .GetProviders(includeUntrusted: true)
+                .ToArray();
 
             // Initialize settings models from global settings
             this._generalSettings = new GeneralSettings
@@ -113,6 +112,8 @@ namespace SmartHopper.Menu.Dialogs
             this._assistantPage = new AssistantSettingsPage(this._providers);
             this._providersPage = new ProvidersSettingsPage(this._providers);
             this._fallbackPage = new FallbackSettingsPage(this._providers);
+            CodexAccountRuntime.Initialize();
+            this._codexAccountPage = new CodexAccountSettingsPage(CodexAccountRuntime.Service, this._settings);
             this._providerPages = new List<GenericProviderSettingsPage>();
 
             // Create provider-specific tabs
@@ -129,6 +130,7 @@ namespace SmartHopper.Menu.Dialogs
             this._fallbackPage.LoadSettings(this._settings.ModalityFallback, this._settings.FallbackProviderPins);
 
             this.CreateTabLayout();
+            this.Closed += this.OnClosed;
         }
 
         /// <summary>
@@ -150,6 +152,13 @@ namespace SmartHopper.Menu.Dialogs
             {
                 Text = "Providers",
                 Content = this._providersPage,
+            });
+
+            // Codex account authentication is intentionally independent from AI providers.
+            tabControl.Pages.Add(new TabPage
+            {
+                Text = "Codex Account",
+                Content = this._codexAccountPage,
             });
 
             // Add SmartHopper Assistant tab
@@ -218,6 +227,7 @@ namespace SmartHopper.Menu.Dialogs
                 this._generalPage.SaveSettings(this._generalSettings);
                 this._providersPage.SaveSettings(this._trustedProvidersSettings, out var providerIntegrityCheckMode);
                 this._assistantPage.SaveSettings(this._assistantSettings);
+                this._codexAccountPage.SaveSettings(this._settings);
 
                 // Save provider-specific settings
                 foreach (var providerPage in this._providerPages)
@@ -250,6 +260,12 @@ namespace SmartHopper.Menu.Dialogs
             {
                 MessageBox.Show(this, $"Error saving settings: {ex.Message}", "Error", MessageBoxType.Error);
             }
+        }
+
+        private void OnClosed(object? sender, EventArgs e)
+        {
+            this.Closed -= this.OnClosed;
+            this._codexAccountPage.ReleaseSubscriptions();
         }
     }
 }

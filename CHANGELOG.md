@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Codex Account**: Codex app-server에 OAuth를 위임하는 독립 계정 탭을 추가해 Codex CLI 탐색, ChatGPT 로그인·취소·상태 새로고침·로그아웃을 지원합니다. SmartHopper는 OAuth 토큰을 직접 읽거나 저장하지 않습니다.
+- **Codex AI components**: Canvas Assistant의 모델·추론 수준을 공용 실행 프로필로 저장하고, 기본 Provider를 사용하는 텍스트 AI 컴포넌트를 같은 Codex app-server 및 ChatGPT 플랜으로 실행할 수 있습니다. 명시적으로 선택한 기존 Provider는 유지됩니다.
+
 ### Fixed
 
 - **CI**: Allow auto-generated `hash-update/*` PRs to add new `hashes/*.json` files while still blocking modifications to existing ones in `pr-build-hash-validation.yml`.

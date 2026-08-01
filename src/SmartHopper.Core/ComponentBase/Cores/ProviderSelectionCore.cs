@@ -114,14 +114,13 @@ namespace SmartHopper.Core.ComponentBase.Cores
         }
 
         /// <summary>
-        /// Resolves the current selection to an <see cref="AIProvider"/> instance, or
+        /// Resolves the current selection to an <see cref="IAIProvider"/> instance, or
         /// <c>null</c> if the provider is not registered.
         /// </summary>
-        public AIProvider GetActualProvider()
+        public IAIProvider GetActualProvider()
         {
             string actualProviderName = ResolveActualProviderName(this.currentProvider);
-            var provider = ProviderManager.Instance.GetProvider(actualProviderName);
-            return provider as AIProvider;
+            return ProviderManager.Instance.GetProvider(actualProviderName);
         }
 
         /// <summary>

@@ -69,6 +69,7 @@ Providers implement API-specific logic while conforming to a common contract so 
 - [IAIProvider](./IAIProvider.md)
 - [AIProvider](./AIProvider.md)
 - [Authentication](./Authentication.md)
+- [Codex app-server ChatGPT 로그인](./CodexOAuth.md) — 계정 인증, 플랜 한도, Canvas Assistant 및 기본 텍스트 AI 컴포넌트 연동
 - [AIProviderModels](./AIProviderModels.md)
 - [IAIProviderFactory](./IAIProviderFactory.md)
 - [IAIProviderSettings](./IAIProviderSettings.md)

@@ -22,7 +22,9 @@ using Eto.Forms;
 using SmartHopper.Infrastructure.AICall.Core.Interactions;
 using SmartHopper.Infrastructure.AICall.Core.Requests;
 using SmartHopper.Infrastructure.AICall.Core.Returns;
+using SmartHopper.Infrastructure.AICall.Sessions;
 using SmartHopper.Infrastructure.AIModels;
+using SmartHopper.Infrastructure.Authentication.Codex;
 
 namespace SmartHopper.Core.UI.Chat
 {
@@ -68,7 +70,9 @@ namespace SmartHopper.Core.UI.Chat
             TaskCompletionSource<AIReturn>? completionTcs,
             bool pushCurrentImmediately,
             bool generateGreeting,
-            out bool reused)
+            out bool reused,
+            Func<IConversationObserver, IConversationSession>? sessionFactory = null,
+            string? title = null)
         {
             EnsureEtoApplication();
 
@@ -89,7 +93,11 @@ namespace SmartHopper.Core.UI.Chat
             }
 
             DebugLog("[WebChatUtils] Creating web chat dialog");
-            var dialog = new WebChatDialog(request, progressReporter, generateGreeting: generateGreeting);
+            var dialog = new WebChatDialog(
+                request,
+                progressReporter,
+                generateGreeting: generateGreeting,
+                sessionFactory: sessionFactory);
             if (componentId != default)
             {
                 OpenDialogs[componentId] = dialog;
@@ -101,7 +109,7 @@ namespace SmartHopper.Core.UI.Chat
             // Incremental updates
             AttachOrReplaceUpdateHandler(componentId, dialog, progressReporter, onUpdate);
 
-            dialog.Title = $"SmartHopper AI Chat - {request.Model} ({request.Provider})";
+            dialog.Title = title ?? $"SmartHopper AI Chat - {request.Model} ({request.Provider})";
             dialog.Show();
             BringToFrontAndFocus(dialog);
 
@@ -232,6 +240,55 @@ namespace SmartHopper.Core.UI.Chat
 
             request.Body = ApplyDefaultWebChatContext(request.Body);
             return request;
+        }
+
+        /// <summary>
+        /// Opens the Canvas Assistant using the authenticated Codex app-server account.
+        /// </summary>
+        public static void EnsureCodexDialogOpen(
+            string modelName,
+            string reasoningEffort,
+            string systemPrompt,
+            Guid componentId,
+            Action<string>? progressReporter = null,
+            Action<AIReturn>? onUpdate = null)
+        {
+            if (componentId == Guid.Empty)
+            {
+                componentId = Guid.NewGuid();
+            }
+
+            var request = new AIRequestCall
+            {
+                Provider = "Codex Account",
+                Model = modelName ?? string.Empty,
+                Endpoint = "canvas-chat",
+                Capability = AICapability.None,
+            };
+
+            Rhino.RhinoApp.InvokeOnUiThread(() =>
+            {
+                _ = OpenOrReuseDialogInternal(
+                    request,
+                    componentId,
+                    progressReporter,
+                    onUpdate,
+                    completionTcs: null,
+                    pushCurrentImmediately: true,
+                    generateGreeting: false,
+                    out _,
+                    observer =>
+                    {
+                        var session = new CodexConversationSession(
+                            CodexAccountRuntime.ConversationTransport,
+                            modelName,
+                            systemPrompt,
+                            observer);
+                        session.Configure(modelName, reasoningEffort);
+                        return session;
+                    },
+                    $"SmartHopper Canvas Assistant - Codex{(string.IsNullOrWhiteSpace(modelName) ? string.Empty : $" ({modelName})")}");
+            });
         }
 
         private static AIBody ApplyDefaultWebChatContext(AIBody body)

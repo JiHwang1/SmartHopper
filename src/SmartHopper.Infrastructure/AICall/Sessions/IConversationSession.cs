@@ -21,8 +21,10 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
     using System.Collections.Generic;
     using System.Threading;
     using System.Threading.Tasks;
+    using SmartHopper.Infrastructure.AICall.Core.Interactions;
     using SmartHopper.Infrastructure.AICall.Core.Requests;
     using SmartHopper.Infrastructure.AICall.Core.Returns;
+    using SmartHopper.Infrastructure.AICall.Metrics;
     using SmartHopper.Infrastructure.Streaming;
 
     /// <summary>
@@ -34,6 +36,18 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
         /// Gets the underlying request used by this session.
         /// </summary>
         AIRequestCall Request { get; }
+
+        AIReturn LastReturn { get; }
+
+        void AddInteraction(string userMessage);
+
+        AIReturn GetHistoryReturn();
+
+        List<IAIInteraction> GetHistoryInteractionList();
+
+        AIMetrics GetCombinedMetrics(bool newInteractionsOnly = false);
+
+        AIMetrics GetTurnMetrics(string turnId);
 
         /// <summary>
         /// Runs the session to a stable result (no further tool calls to execute).
