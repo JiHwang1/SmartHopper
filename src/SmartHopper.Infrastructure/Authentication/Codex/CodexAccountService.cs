@@ -3,7 +3,17 @@
  * Copyright (C) 2024-2026 Marc Roca Musach
  *
  * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public License.
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 3 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this library; if not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
  */
 
 using System;
@@ -49,6 +59,14 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
         }
 
         public CodexAccountState CurrentState => Volatile.Read(ref this.currentState);
+
+        public bool SupportsDynamicTools => this.host.SupportsDynamicTools;
+
+        public CodexServerRequestHandler? ServerRequestHandler
+        {
+            get => this.host.ServerRequestHandler;
+            set => this.host.ServerRequestHandler = value;
+        }
 
         public async Task ConfigureAsync(string? executablePath, string? codexHome, CancellationToken cancellationToken = default)
         {
@@ -370,6 +388,23 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
         {
             await this.EnsureSignedInAsync(cancellationToken).ConfigureAwait(false);
             return await this.host.SendRequestAsync(method, parameters, timeout, cancellationToken).ConfigureAwait(false);
+        }
+
+        public Task SendResponseAsync(
+            JToken requestId,
+            JToken? result,
+            CancellationToken cancellationToken = default)
+        {
+            return this.host.SendResponseAsync(requestId, result, cancellationToken);
+        }
+
+        public Task SendErrorAsync(
+            JToken requestId,
+            int code,
+            string message,
+            CancellationToken cancellationToken = default)
+        {
+            return this.host.SendErrorAsync(requestId, code, message, cancellationToken);
         }
 
         public void BeginShutdown()

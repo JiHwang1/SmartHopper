@@ -675,7 +675,7 @@ namespace SmartHopper.Core.UI
                     WebChatUtils.EnsureCodexDialogOpen(
                         string.IsNullOrWhiteSpace(assistant?.CodexModel) ? assistant?.AssistantModel ?? string.Empty : assistant.CodexModel,
                         assistant?.CodexReasoningEffort ?? string.Empty,
-                        DefaultSystemPrompt + "\n\nThis Codex integration can read the supplied Grasshopper context but does not expose SmartHopper canvas mutation tools. Never claim that you changed the canvas.",
+                        DefaultSystemPrompt + "\n\nCanvas 작업 규칙: 먼저 Canvas를 읽어 정확한 대상 GUID를 확인하고, 요청에 필요한 최소 변경만 수행하세요. 추측으로 component나 connection을 선택하지 마세요. 읽기 전용 모드에서는 수정 도구를 사용할 수 없습니다. 변경 도구는 사용자 승인을 받은 뒤 실행하고, 도구 결과의 verification 상태가 Succeeded인 경우에만 변경 완료라고 말하세요. 일부 실패를 전체 성공으로 표현하지 말고, document mismatch가 발생하면 실행을 중단하세요. 가능하면 smarthopper_workflows와 smarthopper_tool_help를 먼저 사용하세요.",
                         CanvasChatDialogId);
                     return;
                 }

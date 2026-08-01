@@ -68,6 +68,12 @@ namespace SmartHopper.Core.UI.Chat
         private DropDown? _codexModelDropDown;
         private DropDown? _codexReasoningDropDown;
         private Label? _codexConfigurationStatus;
+        private DropDown? _codexEditingModeDropDown;
+        private Label? _codexCanvasStatus;
+        private Panel? _codexApprovalPanel;
+        private Label? _codexApprovalText;
+        private Button? _codexApprovalApplyButton;
+        private Button? _codexApprovalCancelButton;
         private IReadOnlyList<CodexModelOption> _codexModels = Array.Empty<CodexModelOption>();
         private bool _updatingCodexSelectors;
 
@@ -175,6 +181,11 @@ namespace SmartHopper.Core.UI.Chat
                     content.Add(this.CreateCodexConfigurationPanel(), yscale: false);
                     content.Add(this._webView, yscale: true);
                     this.Content = content;
+                    if (this._currentSession is ICodexCanvasToolSession canvasSession && canvasSession.CanvasTools != null)
+                    {
+                        canvasSession.CanvasTools.ApprovalHandler = this.RequestCanvasToolApprovalAsync;
+                        this.PopulateCanvasToolConfiguration(canvasSession.CanvasTools);
+                    }
                     _ = this.LoadCodexConfigurationAsync(codexSession);
                 }
                 else
@@ -235,12 +246,125 @@ namespace SmartHopper.Core.UI.Chat
             panelLayout.Add(selectors, yscale: false);
             panelLayout.Add(this._codexConfigurationStatus, yscale: false);
 
+            this._codexEditingModeDropDown = new DropDown { Enabled = false };
+            this._codexEditingModeDropDown.Items.Add(new ListItem { Text = "읽기 전용", Key = "ReadOnly" });
+            this._codexEditingModeDropDown.Items.Add(new ListItem { Text = "변경 전 확인", Key = "ConfirmChanges" });
+            this._codexEditingModeDropDown.SelectedIndex = 0;
+            this._codexCanvasStatus = new Label { TextColor = Colors.Gray };
+            this._codexApprovalText = new Label { Wrap = WrapMode.Word };
+            this._codexApprovalApplyButton = new Button { Text = "적용" };
+            this._codexApprovalCancelButton = new Button { Text = "취소" };
+            this._codexApprovalPanel = new Panel
+            {
+                Visible = false,
+                Padding = new Padding(8),
+                BackgroundColor = Color.FromArgb(255, 247, 224),
+                Content = new TableLayout
+                {
+                    Spacing = new Size(0, 6),
+                    Rows =
+                    {
+                        new TableRow(new TableCell(this._codexApprovalText, true)),
+                        new TableRow(new StackLayout
+                        {
+                            Orientation = Orientation.Horizontal,
+                            Spacing = 6,
+                            Items = { this._codexApprovalApplyButton, this._codexApprovalCancelButton },
+                        }),
+                    },
+                },
+            };
+            panelLayout.Add(new TableLayout
+            {
+                Spacing = new Size(8, 4),
+                Rows =
+                {
+                    new TableRow(
+                        new Label { Text = "Canvas 편집", VerticalAlignment = VerticalAlignment.Center },
+                        new TableCell(this._codexEditingModeDropDown, false),
+                        new TableCell(this._codexCanvasStatus, true)),
+                },
+            }, yscale: false);
+            panelLayout.Add(this._codexApprovalPanel, yscale: false);
+
             return new Panel
             {
                 Padding = new Padding(10, 7),
                 BackgroundColor = Color.FromArgb(245, 247, 250),
                 Content = panelLayout,
             };
+        }
+
+        private void PopulateCanvasToolConfiguration(ICodexCanvasToolBridge bridge)
+        {
+            if (this._codexEditingModeDropDown == null || this._codexCanvasStatus == null)
+            {
+                return;
+            }
+
+            bridge.EditingMode = CodexCanvasEditingMode.ReadOnly;
+            bridge.BuildDynamicTools();
+            this._codexEditingModeDropDown.SelectedIndex = 0;
+            this._codexEditingModeDropDown.Enabled = true;
+            this._codexCanvasStatus.Text = $"연결: {bridge.CanvasName} · 사용 가능 도구 {bridge.AvailableToolCount}개 · 변경 전 확인: 켜짐";
+            this._codexEditingModeDropDown.SelectedIndexChanged += (_, __) =>
+            {
+                bridge.EditingMode = this._codexEditingModeDropDown.SelectedKey == "ConfirmChanges"
+                    ? CodexCanvasEditingMode.ConfirmChanges
+                    : CodexCanvasEditingMode.ReadOnly;
+                bridge.BuildDynamicTools();
+                this._codexCanvasStatus.Text = bridge.EditingMode == CodexCanvasEditingMode.ReadOnly
+                    ? $"연결: {bridge.CanvasName} · 읽기 전용 · 도구 {bridge.AvailableToolCount}개"
+                    : $"연결: {bridge.CanvasName} · 변경마다 확인 · 도구 {bridge.AvailableToolCount}개";
+            };
+        }
+
+        private Task<bool> RequestCanvasToolApprovalAsync(
+            CodexCanvasToolApprovalRequest request,
+            CancellationToken cancellationToken)
+        {
+            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            CancellationTokenRegistration registration = default;
+            RhinoApp.InvokeOnUiThread(() =>
+            {
+                if (this._codexApprovalPanel == null ||
+                    this._codexApprovalText == null ||
+                    this._codexApprovalApplyButton == null ||
+                    this._codexApprovalCancelButton == null)
+                {
+                    completion.TrySetResult(false);
+                    return;
+                }
+
+                EventHandler<EventArgs>? apply = null;
+                EventHandler<EventArgs>? cancel = null;
+                void Complete(bool approved)
+                {
+                    this._codexApprovalApplyButton.Click -= apply;
+                    this._codexApprovalCancelButton.Click -= cancel;
+                    this._codexApprovalPanel.Visible = false;
+                    completion.TrySetResult(approved);
+                }
+
+                apply = (_, __) => Complete(true);
+                cancel = (_, __) => Complete(false);
+                this._codexApprovalApplyButton.Click += apply;
+                this._codexApprovalCancelButton.Click += cancel;
+                this._codexApprovalText.Text =
+                    $"Canvas 변경 승인 요청\n도구: {request.ToolName}\n요약: {request.Summary}\n영향 GUID: {request.AffectedGuidCount}개\n위험도: {request.Risk}";
+                this._codexApprovalPanel.Visible = true;
+                registration = cancellationToken.Register(() => RhinoApp.InvokeOnUiThread(() => Complete(false)));
+            });
+
+            return completion.Task.ContinueWith(
+                task =>
+                {
+                    registration.Dispose();
+                    return task.Result;
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
         }
 
         private async Task LoadCodexConfigurationAsync(ICodexConfigurableConversationSession session)

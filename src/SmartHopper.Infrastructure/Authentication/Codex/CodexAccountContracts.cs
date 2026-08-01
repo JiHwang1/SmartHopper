@@ -6,6 +6,14 @@
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either
  * version 3 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this library; if not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
  */
 
 using System;
@@ -156,6 +164,10 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
     {
         event EventHandler<CodexNotificationEventArgs>? NotificationReceived;
 
+        CodexServerRequestHandler? ServerRequestHandler { get; set; }
+
+        bool SupportsDynamicTools { get; }
+
         Task EnsureSignedInAsync(CancellationToken cancellationToken = default);
 
         Task<JToken> SendAsync(
@@ -163,6 +175,10 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
             JObject? parameters = null,
             TimeSpan? timeout = null,
             CancellationToken cancellationToken = default);
+
+        Task SendResponseAsync(JToken requestId, JToken? result, CancellationToken cancellationToken = default);
+
+        Task SendErrorAsync(JToken requestId, int code, string message, CancellationToken cancellationToken = default);
     }
 
     /// <summary>
@@ -241,17 +257,53 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
     }
 
     /// <summary>
+    /// 서버가 시작한 JSON-RPC 요청입니다. 응답에서 정확히 되돌려줄 수 있도록 request ID의
+    /// 원래 JSON 문자열 또는 정수 표현을 보존합니다.
+    /// </summary>
+    public sealed class CodexServerRequest
+    {
+        public CodexServerRequest(JToken requestId, string method, JObject parameters)
+        {
+            this.RequestId = requestId?.DeepClone() ?? throw new ArgumentNullException(nameof(requestId));
+            this.Method = method ?? throw new ArgumentNullException(nameof(method));
+            this.Parameters = parameters != null
+                ? (JObject)parameters.DeepClone()
+                : new JObject();
+        }
+
+        public JToken RequestId { get; }
+
+        public string Method { get; }
+
+        public JObject Parameters { get; }
+    }
+
+    /// <summary>
+    /// 서버가 시작한 JSON-RPC 요청 하나를 처리하는 비동기 callback입니다.
+    /// callback은 transport를 통해 response 또는 error 하나를 보내고 끝나야 합니다.
+    /// </summary>
+    public delegate Task CodexServerRequestHandler(CodexServerRequest request, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Minimal connection abstraction used by the account service and test fakes.
     /// </summary>
     public interface ICodexAppServerHost : IAsyncDisposable
     {
         event EventHandler<CodexNotificationEventArgs>? NotificationReceived;
 
+        CodexServerRequestHandler? ServerRequestHandler { get; set; }
+
         bool IsRunning { get; }
+
+        bool SupportsDynamicTools { get; }
 
         Task StartAsync(CodexLaunchOptions options, CancellationToken cancellationToken = default);
 
         Task<JToken> SendRequestAsync(string method, JObject? parameters = null, TimeSpan? timeout = null, CancellationToken cancellationToken = default);
+
+        Task SendResponseAsync(JToken requestId, JToken? result, CancellationToken cancellationToken = default);
+
+        Task SendErrorAsync(JToken requestId, int code, string message, CancellationToken cancellationToken = default);
 
         Task StopAsync(CancellationToken cancellationToken = default);
 

@@ -3,7 +3,17 @@
  * Copyright (C) 2024-2026 Marc Roca Musach
  *
  * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public License.
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 3 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this library; if not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
  */
 
 using System;
@@ -24,9 +34,25 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
         private Process? process;
         private CodexJsonRpcClient? client;
         private Task? stderrDrain;
+        private CodexServerRequestHandler? serverRequestHandler;
+        private bool supportsDynamicTools;
         private int disposed;
 
         public event EventHandler<CodexNotificationEventArgs>? NotificationReceived;
+
+        public CodexServerRequestHandler? ServerRequestHandler
+        {
+            get => this.serverRequestHandler;
+            set
+            {
+                this.serverRequestHandler = value;
+                var current = this.client;
+                if (current != null)
+                {
+                    current.ServerRequestHandler = value;
+                }
+            }
+        }
 
         public bool IsRunning
         {
@@ -48,6 +74,8 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
                 }
             }
         }
+
+        public bool SupportsDynamicTools => this.IsRunning && this.supportsDynamicTools;
 
         public async Task StartAsync(CodexLaunchOptions options, CancellationToken cancellationToken = default)
         {
@@ -81,6 +109,7 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
                 }
 
                 var startedClient = new CodexJsonRpcClient(startedProcess.StandardOutput, startedProcess.StandardInput);
+                startedClient.ServerRequestHandler = this.serverRequestHandler;
                 startedClient.NotificationReceived += this.OnNotificationReceived;
                 startedProcess.Exited += this.OnProcessExited;
                 this.process = startedProcess;
@@ -90,23 +119,25 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
 
                 try
                 {
-                    await startedClient.SendRequestAsync(
-                        "initialize",
-                        new JObject
-                        {
-                            ["clientInfo"] = new JObject
-                            {
-                                ["name"] = "SmartHopper",
-                                ["title"] = "SmartHopper",
-                                ["version"] = GetAssemblyVersion(),
-                            },
-                            ["capabilities"] = new JObject
-                            {
-                                ["experimentalApi"] = false,
-                            },
-                        },
-                        TimeSpan.FromSeconds(15),
-                        cancellationToken).ConfigureAwait(false);
+                    try
+                    {
+                        await startedClient.SendRequestAsync(
+                            "initialize",
+                            CreateInitializeParameters(experimentalApi: true),
+                            TimeSpan.FromSeconds(15),
+                            cancellationToken).ConfigureAwait(false);
+                        this.supportsDynamicTools = true;
+                    }
+                    catch (CodexJsonRpcException ex) when (ex.Code == -32601 || ex.Code == -32602)
+                    {
+                        await startedClient.SendRequestAsync(
+                            "initialize",
+                            CreateInitializeParameters(experimentalApi: false),
+                            TimeSpan.FromSeconds(15),
+                            cancellationToken).ConfigureAwait(false);
+                        this.supportsDynamicTools = false;
+                    }
+
                     await startedClient.SendNotificationAsync("initialized", cancellationToken: cancellationToken).ConfigureAwait(false);
                 }
                 catch
@@ -141,6 +172,35 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
             }
 
             return current.SendRequestAsync(method, parameters, timeout, cancellationToken);
+        }
+
+        public Task SendResponseAsync(
+            JToken requestId,
+            JToken? result,
+            CancellationToken cancellationToken = default)
+        {
+            var current = this.client;
+            if (current == null || !this.IsRunning)
+            {
+                throw new CodexTransportClosedException();
+            }
+
+            return current.SendResponseAsync(requestId, result, cancellationToken);
+        }
+
+        public Task SendErrorAsync(
+            JToken requestId,
+            int code,
+            string message,
+            CancellationToken cancellationToken = default)
+        {
+            var current = this.client;
+            if (current == null || !this.IsRunning)
+            {
+                throw new CodexTransportClosedException();
+            }
+
+            return current.SendErrorAsync(requestId, code, message, cancellationToken);
         }
 
         public async Task StopAsync(CancellationToken cancellationToken = default)
@@ -179,6 +239,7 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
                 this.process = null;
                 this.client = null;
                 this.stderrDrain = null;
+                this.supportsDynamicTools = false;
             }
             finally
             {
@@ -235,6 +296,23 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
                 .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
                 ?? typeof(CodexAppServerHost).Assembly.GetName().Version?.ToString()
                 ?? "0.0.0";
+        }
+
+        private static JObject CreateInitializeParameters(bool experimentalApi)
+        {
+            return new JObject
+            {
+                ["clientInfo"] = new JObject
+                {
+                    ["name"] = "SmartHopper",
+                    ["title"] = "SmartHopper",
+                    ["version"] = GetAssemblyVersion(),
+                },
+                ["capabilities"] = new JObject
+                {
+                    ["experimentalApi"] = experimentalApi,
+                },
+            };
         }
 
         private static bool HasExited(Process process)

@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Codex Account**: Codex app-server에 OAuth를 위임하는 독립 계정 탭을 추가해 Codex CLI 탐색, ChatGPT 로그인·취소·상태 새로고침·로그아웃을 지원합니다. SmartHopper는 OAuth 토큰을 직접 읽거나 저장하지 않습니다.
 - **Codex AI components**: Canvas Assistant의 모델·추론 수준을 공용 실행 프로필로 저장하고, 기본 Provider를 사용하는 텍스트 AI 컴포넌트를 같은 Codex app-server 및 ChatGPT 플랜으로 실행할 수 있습니다. 명시적으로 선택한 기존 Provider는 유지됩니다.
+- **Codex Canvas Dynamic Tools**: 기존 SmartHopper `AITool`을 `smarthopper` namespace로 연결하고, 문서 바인딩, 기본 읽기 전용, 변경별 승인, UI thread 직렬 실행, 취소 및 변경 후 검증을 적용했습니다. Dynamic Tools 미지원 CLI에서는 기존 읽기 전용 대화로 복귀합니다.
+- **공통 외부 도구 adapter**: MCP와 Codex가 catalog, allow-list, schema 변환, 실행 및 결과 mapping을 공유하도록 외부 adapter 계층을 분리했습니다.
 
 ### Fixed
 

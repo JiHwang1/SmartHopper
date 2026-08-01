@@ -28,14 +28,11 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using SmartHopper.Infrastructure.AICall.Core.Base;
-using SmartHopper.Infrastructure.AICall.Core.Interactions;
 using SmartHopper.Infrastructure.AICall.Core.Returns;
 using SmartHopper.Infrastructure.AICall.Tools;
 using SmartHopper.Infrastructure.AITools;
-using SmartHopper.Infrastructure.Diagnostics;
+using SmartHopper.Infrastructure.AITools.External;
 
 namespace SmartHopper.Infrastructure.Mcp
 {
@@ -52,8 +49,8 @@ namespace SmartHopper.Infrastructure.Mcp
     public sealed class AIToolMcpAdapter
     {
         private readonly McpServerOptions options;
-        private readonly Func<IReadOnlyDictionary<string, AITool>> toolSource;
-        private readonly Func<AIToolCall, Task<AIReturn>> executor;
+        private readonly AIToolExternalCatalog catalog;
+        private readonly AIToolExternalExecutor executor;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="AIToolMcpAdapter"/> class.
@@ -74,8 +71,10 @@ namespace SmartHopper.Infrastructure.Mcp
             Func<AIToolCall, Task<AIReturn>> executor)
         {
             this.options = options ?? throw new ArgumentNullException(nameof(options));
-            this.toolSource = toolSource ?? throw new ArgumentNullException(nameof(toolSource));
-            this.executor = executor ?? throw new ArgumentNullException(nameof(executor));
+            this.catalog = new AIToolExternalCatalog(toolSource ?? throw new ArgumentNullException(nameof(toolSource)));
+            this.executor = new AIToolExternalExecutor(
+                this.catalog,
+                executor ?? throw new ArgumentNullException(nameof(executor)));
         }
 
         /// <summary>
@@ -84,29 +83,15 @@ namespace SmartHopper.Infrastructure.Mcp
         /// </summary>
         public IReadOnlyList<McpToolDescriptor> BuildDescriptors()
         {
-            var allTools = this.toolSource();
-            var descriptors = new List<McpToolDescriptor>();
-            foreach (var pair in allTools)
-            {
-                var tool = pair.Value;
-                if (!this.IsExposed(tool.Name))
-                {
-                    continue;
-                }
-
-                JObject inputSchema = ParseSchema(tool.ParametersSchema);
-                JObject outputSchema = ParseSchema(tool.OutputSchema);
-                descriptors.Add(new McpToolDescriptor(
+            return this.catalog.BuildDescriptors(this.CreateCatalogOptions())
+                .Select(tool => new McpToolDescriptor(
                     tool.Name,
-                    tool.RichDescription,
-                    inputSchema,
+                    tool.Description,
+                    tool.InputSchema,
                     tool.Tags,
-                    outputSchema,
-                    tool.Annotations));
-            }
-
-            descriptors.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
-            return descriptors;
+                    tool.OutputSchema,
+                    tool.Annotations))
+                .ToList();
         }
 
         /// <summary>
@@ -114,34 +99,7 @@ namespace SmartHopper.Infrastructure.Mcp
         /// </summary>
         public bool IsExposed(string toolName)
         {
-            if (string.IsNullOrWhiteSpace(toolName))
-            {
-                return false;
-            }
-
-            var tool = this.toolSource().TryGetValue(toolName, out var resolvedTool) ? resolvedTool : null;
-            if (tool == null)
-            {
-                return false;
-            }
-
-            if (!tool.Enabled)
-            {
-                return false;
-            }
-
-            if (this.options.EnabledTools != null && this.options.EnabledTools.Count > 0)
-            {
-                return this.options.EnabledTools.Any(t =>
-                    string.Equals(t, toolName, StringComparison.OrdinalIgnoreCase));
-            }
-
-            if (!this.options.ExposeMutatingTools && tool.MutatesCanvas)
-            {
-                return false;
-            }
-
-            return true;
+            return this.catalog.IsExposed(toolName, this.CreateCatalogOptions());
         }
 
         /// <summary>
@@ -162,87 +120,23 @@ namespace SmartHopper.Infrastructure.Mcp
                 return McpToolCallResult.Error($"Tool '{toolName}' is not exposed via MCP");
             }
 
-            var tools = this.toolSource();
-            if (!tools.ContainsKey(toolName))
-            {
-                return McpToolCallResult.Error($"Tool '{toolName}' is not registered");
-            }
+            var result = await this.executor.ExecuteAsync(
+                toolName,
+                arguments,
+                this.CreateCatalogOptions()).ConfigureAwait(false);
+            return result.IsError
+                ? McpToolCallResult.Error(result.ErrorMessage ?? $"Tool '{toolName}' failed")
+                : McpToolCallResult.Ok(result.Payload);
+        }
 
-            var interaction = new AIInteractionToolCall
+        private AIToolExternalCatalogOptions CreateCatalogOptions()
+        {
+            return new AIToolExternalCatalogOptions
             {
-                Id = Guid.NewGuid().ToString("N"),
-                Name = toolName,
-                Arguments = arguments ?? new JObject(),
+                EnabledTools = this.options.EnabledTools,
+                ExposeMutatingTools = this.options.ExposeMutatingTools,
+                AllowListOverridesMutatingFilter = true,
             };
-
-            var toolCall = new AIToolCall { SkipMetricsValidation = true };
-            toolCall.FromToolCallInteraction(interaction);
-
-            AIReturn result;
-            try
-            {
-                result = await this.executor(toolCall).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                return McpToolCallResult.Error($"Tool '{toolName}' threw an exception: {ex.Message}");
-            }
-
-            return BuildResult(toolName, result);
-        }
-
-        private static JObject ParseSchema(string parametersSchema)
-        {
-            if (string.IsNullOrWhiteSpace(parametersSchema))
-            {
-                return new JObject { ["type"] = "object" };
-            }
-
-            try
-            {
-                var parsed = JToken.Parse(parametersSchema);
-                if (parsed is JObject obj)
-                {
-                    return obj;
-                }
-            }
-            catch (JsonReaderException)
-            {
-                // Fall through to a defensive default below; surfacing this loudly
-                // is the tool author's responsibility.
-            }
-
-            return new JObject { ["type"] = "object" };
-        }
-
-        private static McpToolCallResult BuildResult(string toolName, AIReturn? result)
-        {
-            if (result == null)
-            {
-                return McpToolCallResult.Error($"Tool '{toolName}' returned no result");
-            }
-
-            // Prefer the tool result interaction when present: a successful tool
-            // run always appends an AIInteractionToolResult to the body.
-            var lastToolResult = result.Body?.Interactions?
-                .OfType<AIInteractionToolResult>()
-                .LastOrDefault();
-            if (lastToolResult?.Result != null)
-            {
-                return McpToolCallResult.Ok(lastToolResult.Result);
-            }
-
-            // Otherwise surface any explicit error. Previously Origin.Return and
-            // Origin.Validation were ignored, which caused AI tools that call
-            // CreateError (e.g., from gh_get) to silently return an empty object.
-            var firstError = result.Messages?
-                .FirstOrDefault(m => m?.Severity == SHRuntimeMessageSeverity.Error);
-            if (firstError != null)
-            {
-                return McpToolCallResult.Error(firstError.Message ?? $"Tool '{toolName}' failed");
-            }
-
-            return McpToolCallResult.Ok(new JObject());
         }
     }
 }

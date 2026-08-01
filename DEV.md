@@ -70,6 +70,19 @@ This document aggregates development-facing information.
 
 ### AI Tools
 
+Codex Canvas Assistant는 app-server의 Dynamic Tools를 통해 같은 `AIToolManager` catalog를 사용합니다. `AIToolExternalCatalog`, `AIToolExternalExecutor`, `AIToolExternalResultMapper`가 MCP와 Codex의 공통 경계이며, 프로토콜별 adapter는 descriptor와 response envelope만 변환해야 합니다.
+
+Codex Canvas 실행은 다음 경계를 지킵니다.
+
+- thread의 filesystem sandbox는 `read-only`를 유지합니다.
+- session 생성 시 활성 `GH_Document`와 `DocumentID`를 캡처하며 실행 직전 active document 일치를 다시 확인합니다.
+- mutation allow-list는 삭제, 버튼 클릭, patch 적용, 파일 쓰기 및 외부 side effect 도구를 제외합니다.
+- 새 session은 `ReadOnly`이고 첫 UI는 `ConfirmChanges`까지만 제공합니다. mutation은 비동기 승인과 단일 실행 gate를 통과합니다.
+- 기존 도구가 기록하는 Grasshopper Undo event를 재사용하고, 실행 전후 문서 객체·위치·연결 지문이 달라진 경우에만 검증 성공을 반환합니다.
+- Stop, dialog close 및 transport 종료는 turn과 pending tool/approval cancellation을 함께 전달합니다.
+
+Codex app-server protocol을 변경할 때는 설치된 CLI의 `generate-json-schema --experimental` 출력과 공식 app-server manual을 함께 확인합니다. server request ID는 문자열과 정수 JSON type을 그대로 보존하고 각 요청에 정확히 한 번 응답해야 하며, tool arguments 전체나 OAuth material을 진단 로그에 남기지 않습니다.
+
 AI Tools are the interface between AI and Grasshopper, allowing to, for example,
 read your selected components, get the available Grasshopper components, or write
 a new script. All these tools are available to the provider to use while chatting
@@ -272,4 +285,3 @@ See [`docs/Components/IO/Persistence.md`](./docs/Components/IO/Persistence.md) f
 —
 
 Is there something missing? Do you have a suggestion? Please open a discussion in the [Ideas](https://github.com/architects-toolkit/SmartHopper/discussions/categories/ideas) section in the Discussions tab.
-

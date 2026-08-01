@@ -1,7 +1,19 @@
 /*
  * SmartHopper - AI-powered Grasshopper Plugin
  * Copyright (C) 2024-2026 Marc Roca Musach
- * Licensed under the GNU Lesser General Public License.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 3 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this library; if not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
  */
 
 using System;
@@ -186,7 +198,11 @@ namespace SmartHopper.Infrastructure.Tests.Authentication
         {
             public event EventHandler<CodexNotificationEventArgs>? NotificationReceived;
 
+            public CodexServerRequestHandler? ServerRequestHandler { get; set; }
+
             public bool IsRunning { get; private set; }
+
+            public bool SupportsDynamicTools => true;
 
             public JObject? Account { get; set; }
 
@@ -274,6 +290,16 @@ namespace SmartHopper.Infrastructure.Tests.Authentication
             public Task StopAsync(CancellationToken cancellationToken = default)
             {
                 this.IsRunning = false;
+                return Task.CompletedTask;
+            }
+
+            public Task SendResponseAsync(JToken requestId, JToken? result, CancellationToken cancellationToken = default)
+            {
+                return Task.CompletedTask;
+            }
+
+            public Task SendErrorAsync(JToken requestId, int code, string message, CancellationToken cancellationToken = default)
+            {
                 return Task.CompletedTask;
             }
 

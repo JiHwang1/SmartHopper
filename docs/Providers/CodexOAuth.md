@@ -32,9 +32,14 @@ codex app-server --help
 2. Grasshopper 캔버스 오른쪽 위 SmartHopper 버튼을 누릅니다.
 3. Canvas Assistant 상단에서 현재 계정에 허용된 모델과 추론 수준을 선택합니다.
 4. 선택값은 즉시 저장되며 다음 메시지와 기본 Provider를 사용하는 AI 컴포넌트부터 적용됩니다.
-5. 채팅 메시지는 `thread/start`와 `turn/start`를 통해 전송되며 응답은 기존 SmartHopper 채팅창에 스트리밍됩니다.
+5. 상단의 `Canvas 편집`은 새 대화마다 `읽기 전용`으로 시작합니다. 변경이 필요하면 첫 메시지를 보내기 전에 `변경 전 확인`을 선택합니다.
+6. 채팅 메시지는 `thread/start`와 `turn/start`를 통해 전송되며 응답은 기존 SmartHopper 채팅창에 스트리밍됩니다.
 
-Codex 대화 thread는 임시 thread로 생성되고 읽기 전용 sandbox와 승인 없는 정책을 사용합니다. 현재 파일·환경·선택 항목의 요약 컨텍스트는 전달하지만, Codex 경로에는 SmartHopper의 캔버스 변경 도구가 아직 노출되지 않습니다. 따라서 이 경로는 질문, 설명 및 검토에 사용할 수 있고 캔버스 생성·수정은 수행하지 않습니다.
+Codex 대화 thread는 임시 thread로 생성되고 파일 시스템 sandbox는 계속 `read-only`입니다. Canvas 조회와 변경은 `smarthopper` Dynamic Tools namespace를 통해 Rhino 프로세스 안의 기존 `AIToolManager`가 수행합니다. 변경 요청은 도구 이름, 변경 요약, 영향 GUID 수를 표시하는 비동기 승인 패널에서 `적용`을 눌러야 실행됩니다. 삭제, 버튼 클릭, patch 적용, 문서 저장, 파일 및 외부 프로그램 도구는 첫 릴리스에서 노출하지 않습니다.
+
+대화는 열릴 때 활성 Grasshopper 문서의 reference와 `DocumentID`에 고정됩니다. 이후 다른 문서를 활성화하거나 원래 문서를 닫으면 도구 실행을 중단하며 새 문서를 자동으로 수정하지 않습니다. 변경 도구는 한 번에 하나씩 UI thread에서 실행되고, 기존 도구의 Grasshopper Undo 기록을 유지하며, 실행 전후 Canvas 상태를 다시 비교해 검증된 결과만 Codex에 반환합니다.
+
+Codex CLI가 Dynamic Tools 실험 API를 지원하지 않거나 descriptor를 거부하면 `dynamicTools` 없이 thread를 다시 시작합니다. 이 경우 채팅은 유지되지만 Canvas 도구는 사용할 수 없으며 transcript에 읽기 전용 fallback 상태가 표시됩니다.
 
 ## AI 컴포넌트에서 사용
 
@@ -96,9 +101,20 @@ Codex 대화 thread는 임시 thread로 생성되고 읽기 전용 sandbox와 �
 7. `Sign out` 후 이메일과 플랜이 사라지고 로그인 버튼이 다시 활성화되는지 확인합니다.
 8. Rhino를 종료한 뒤 해당 SmartHopper 세션이 시작한 Codex app-server 자식 프로세스가 남지 않는지 확인합니다.
 
+### Canvas Dynamic Tools
+
+1. 테스트 문서를 열고 Canvas Assistant를 시작해 연결된 Canvas 이름과 `읽기 전용` 상태가 맞는지 확인합니다.
+2. 선택 객체 조회를 요청하고 승인 없이 결과가 돌아온 뒤 최종 답변까지 이어지는지 확인합니다.
+3. `변경 전 확인`을 선택한 뒤 컴포넌트 추가, 이동, 연결, 연결 해제를 각각 요청합니다.
+4. 승인 패널에서 `취소`한 요청이 Canvas를 바꾸지 않는지, `적용`한 요청만 바뀌고 Grasshopper Undo로 복구되는지 확인합니다.
+5. 두 문서를 열고 대화가 연결된 문서가 아닌 다른 문서를 활성화한 뒤 변경을 요청합니다. 문서 불일치 오류가 표시되고 어느 문서도 바뀌지 않아야 합니다.
+6. 승인 대기 및 실행 중 `Stop`을 눌러 turn interrupt와 도구 취소가 함께 동작하는지 확인합니다.
+7. Rhino runtime message와 변경 후 `verification.status`를 확인하고, `VerificationFailed`인 요청을 Assistant가 성공으로 설명하지 않는지 확인합니다.
+
 ## 현재 제한 사항
 
 - Codex Account Provider는 텍스트 입력·텍스트 출력·JSON 출력 AI 컴포넌트를 지원합니다.
 - 이미지·오디오 입출력과 Provider 수준 function calling은 지원하지 않습니다.
-- SmartHopper 도구를 Codex dynamic tool로 연결하는 기능은 아직 없습니다.
-- Canvas Assistant에서 캔버스를 직접 생성·수정하는 기능은 아직 없습니다.
+- Dynamic Tools에는 현재 Canvas 조회 도구와 명시된 안전한 mutation allow-list만 노출됩니다. 삭제, 파일 쓰기, 외부 프로그램 실행 및 광범위한 patch 적용은 지원하지 않습니다.
+- `TrustedSession`을 표현하는 정책 형식은 준비되어 있지만 첫 UI에서는 제공하지 않습니다. 변경은 항상 건별 확인합니다.
+- 일반적인 postcondition은 문서 객체, 위치 및 연결 상태 지문으로 검증합니다. Rhino 8 실제 UI 동작과 Undo는 위 수동 절차로 별도 확인해야 합니다.

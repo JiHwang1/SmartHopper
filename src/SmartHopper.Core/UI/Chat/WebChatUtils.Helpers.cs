@@ -19,6 +19,7 @@
 using System;
 using System.Threading.Tasks;
 using Eto.Forms;
+using Grasshopper;
 using SmartHopper.Infrastructure.AICall.Core.Interactions;
 using SmartHopper.Infrastructure.AICall.Core.Requests;
 using SmartHopper.Infrastructure.AICall.Core.Returns;
@@ -279,11 +280,14 @@ namespace SmartHopper.Core.UI.Chat
                     out _,
                     observer =>
                     {
+                        var document = Instances.ActiveCanvas?.Document;
+                        var canvasTools = document != null ? new CodexCanvasToolBridge(document) : null;
                         var session = new CodexConversationSession(
                             CodexAccountRuntime.ConversationTransport,
                             modelName,
                             systemPrompt,
-                            observer);
+                            observer,
+                            dynamicToolBridge: canvasTools);
                         session.Configure(modelName, reasoningEffort);
                         return session;
                     },

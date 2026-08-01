@@ -3,10 +3,21 @@
  * Copyright (C) 2024-2026 Marc Roca Musach
  *
  * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public License.
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 3 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this library; if not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
@@ -28,12 +39,15 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
     /// <summary>
     /// Adapts Codex app-server threads and turns to SmartHopper's chat session contract.
     /// </summary>
-    public sealed class CodexConversationSession : IConversationSession, ICodexConfigurableConversationSession, IDisposable
+    public sealed class CodexConversationSession : IConversationSession, ICodexConfigurableConversationSession, ICodexCanvasToolSession, IDisposable
     {
         private readonly ICodexConversationTransport transport;
         private readonly IConversationObserver observer;
         private readonly string systemPrompt;
         private readonly bool includeCurrentContext;
+        private readonly ICodexDynamicToolBridge? dynamicToolBridge;
+        private readonly CodexServerRequestHandler? serverRequestHandler;
+        private readonly ConcurrentDictionary<string, byte> handledCallIds = new (StringComparer.Ordinal);
         private string model;
         private string reasoningEffort = string.Empty;
         private readonly object sync = new ();
@@ -43,7 +57,9 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
         private string? threadId;
         private string? activeTurnId;
         private string? pendingUserMessage;
+        private CancellationTokenSource? activeToolCancellation;
         private AIReturn lastReturn = CreateReturn(Array.Empty<IAIInteraction>());
+        private bool dynamicToolsFallbackReported;
         private int disposed;
 
         public CodexConversationSession(
@@ -51,13 +67,15 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
             string model,
             string systemPrompt,
             IConversationObserver observer,
-            bool includeCurrentContext = true)
+            bool includeCurrentContext = true,
+            ICodexDynamicToolBridge? dynamicToolBridge = null)
         {
             this.transport = transport ?? throw new ArgumentNullException(nameof(transport));
             this.model = model ?? string.Empty;
             this.systemPrompt = systemPrompt ?? string.Empty;
             this.observer = observer ?? throw new ArgumentNullException(nameof(observer));
             this.includeCurrentContext = includeCurrentContext;
+            this.dynamicToolBridge = dynamicToolBridge;
             this.Request = new AIRequestCall
             {
                 Provider = "Codex Account",
@@ -66,11 +84,18 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
                 Capability = AIModels.AICapability.None,
             };
             this.transport.NotificationReceived += this.OnNotificationReceived;
+            if (this.dynamicToolBridge != null)
+            {
+                this.serverRequestHandler = this.HandleServerRequestAsync;
+                this.transport.ServerRequestHandler = this.serverRequestHandler;
+            }
         }
 
         public AIRequestCall Request { get; }
 
         public AIReturn LastReturn => this.lastReturn;
+
+        public ICodexCanvasToolBridge? CanvasTools => this.dynamicToolBridge as ICodexCanvasToolBridge;
 
         public string SelectedModel
         {
@@ -247,11 +272,16 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
         {
             string? currentThread;
             string? currentTurn;
+            CancellationTokenSource? toolCancellation;
             lock (this.sync)
             {
                 currentThread = this.threadId;
                 currentTurn = this.activeTurnId;
+                toolCancellation = this.activeToolCancellation;
             }
+
+            toolCancellation?.Cancel();
+            this.dynamicToolBridge?.CancelPending();
 
             if (!string.IsNullOrWhiteSpace(currentThread) && !string.IsNullOrWhiteSpace(currentTurn))
             {
@@ -274,6 +304,14 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
             }
 
             this.transport.NotificationReceived -= this.OnNotificationReceived;
+            if (this.serverRequestHandler != null && this.transport.ServerRequestHandler == this.serverRequestHandler)
+            {
+                this.transport.ServerRequestHandler = null;
+            }
+
+            this.activeToolCancellation?.Cancel();
+            this.activeToolCancellation?.Dispose();
+            this.dynamicToolBridge?.Dispose();
             this.turnCompleted?.TrySetCanceled();
         }
 
@@ -299,6 +337,7 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
                 string currentModel;
                 string currentReasoningEffort;
                 var completion = new TaskCompletionSource<JObject>(TaskCreationOptions.RunContinuationsAsynchronously);
+                var toolCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 lock (this.sync)
                 {
                     currentModel = this.model;
@@ -306,6 +345,7 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
                     this.turnCompleted = completion;
                     this.streamedText = new StringBuilder();
                     this.activeTurnId = null;
+                    this.activeToolCancellation = toolCancellation;
                 }
 
                 var response = await this.transport.SendAsync(
@@ -370,6 +410,8 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
                 {
                     this.turnCompleted = null;
                     this.activeTurnId = null;
+                    this.activeToolCancellation?.Dispose();
+                    this.activeToolCancellation = null;
                 }
             }
         }
@@ -387,18 +429,49 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
                 currentModel = this.model;
             }
 
-            var response = await this.transport.SendAsync(
-                "thread/start",
-                new JObject
+            var parameters = new JObject
+            {
+                ["model"] = string.IsNullOrWhiteSpace(currentModel) ? null : currentModel,
+                ["baseInstructions"] = this.systemPrompt,
+                ["ephemeral"] = true,
+                ["approvalPolicy"] = "never",
+                ["sandbox"] = "read-only",
+            };
+            var dynamicToolsAdded = false;
+            if (this.dynamicToolBridge != null && this.transport.SupportsDynamicTools)
+            {
+                var dynamicTools = this.dynamicToolBridge.BuildDynamicTools();
+                if (dynamicTools.Count > 0)
                 {
-                    ["model"] = string.IsNullOrWhiteSpace(currentModel) ? null : currentModel,
-                    ["baseInstructions"] = this.systemPrompt,
-                    ["ephemeral"] = true,
-                    ["approvalPolicy"] = "never",
-                    ["sandbox"] = "read-only",
-                },
-                TimeSpan.FromSeconds(30),
-                cancellationToken).ConfigureAwait(false);
+                    parameters["dynamicTools"] = dynamicTools;
+                    dynamicToolsAdded = true;
+                }
+            }
+            else if (this.dynamicToolBridge != null)
+            {
+                this.ReportDynamicToolsFallback();
+            }
+
+            JToken response;
+            try
+            {
+                response = await this.transport.SendAsync(
+                    "thread/start",
+                    parameters,
+                    TimeSpan.FromSeconds(30),
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (CodexJsonRpcException ex) when (dynamicToolsAdded && (ex.Code == -32601 || ex.Code == -32602))
+            {
+                parameters.Remove("dynamicTools");
+                this.ReportDynamicToolsFallback();
+                response = await this.transport.SendAsync(
+                    "thread/start",
+                    parameters,
+                    TimeSpan.FromSeconds(30),
+                    cancellationToken).ConfigureAwait(false);
+            }
+
             this.threadId = (response as JObject)?["thread"]?.Value<string>("id");
             if (string.IsNullOrWhiteSpace(this.threadId))
             {
@@ -442,6 +515,143 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
             else if (notification.Method == "turn/completed" && notification.Parameters["turn"] is JObject turn)
             {
                 this.turnCompleted?.TrySetResult(turn);
+            }
+        }
+
+        private async Task HandleServerRequestAsync(
+            CodexServerRequest request,
+            CancellationToken cancellationToken)
+        {
+            if (!string.Equals(request.Method, "item/tool/call", StringComparison.Ordinal) || this.dynamicToolBridge == null)
+            {
+                await this.transport.SendErrorAsync(
+                    request.RequestId,
+                    -32601,
+                    "Client method not supported.",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            if (!CodexDynamicToolCall.TryParse(request.Parameters, out var call) || call == null)
+            {
+                await this.SendToolResultAsync(
+                    request.RequestId,
+                    CodexDynamicToolResult.Error("Canvas 도구 요청 형식이 올바르지 않습니다."),
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            string? currentThread;
+            string? currentTurn;
+            CancellationToken toolCancellation;
+            lock (this.sync)
+            {
+                currentThread = this.threadId;
+                currentTurn = this.activeTurnId;
+                toolCancellation = this.activeToolCancellation?.Token ?? CancellationToken.None;
+            }
+
+            if (!string.Equals(call.ThreadId, currentThread, StringComparison.Ordinal))
+            {
+                await this.SendToolResultAsync(
+                    request.RequestId,
+                    CodexDynamicToolResult.Error("현재 Canvas Assistant 대화에 속하지 않는 도구 요청입니다."),
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(currentTurn) || !string.Equals(call.TurnId, currentTurn, StringComparison.Ordinal))
+            {
+                await this.SendToolResultAsync(
+                    request.RequestId,
+                    CodexDynamicToolResult.Error("현재 활성 turn에 속하지 않는 도구 요청입니다."),
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            if (!string.Equals(call.Namespace, CodexDynamicToolBridge.NamespaceName, StringComparison.Ordinal))
+            {
+                await this.SendToolResultAsync(
+                    request.RequestId,
+                    CodexDynamicToolResult.Error("지원하지 않는 Canvas 도구 namespace입니다."),
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            if (!this.handledCallIds.TryAdd(call.CallId, 0))
+            {
+                await this.SendToolResultAsync(
+                    request.RequestId,
+                    CodexDynamicToolResult.Error("이미 처리한 Canvas 도구 요청입니다."),
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            var toolInteraction = new AIInteractionToolCall
+            {
+                Id = call.CallId,
+                Name = call.Tool,
+                TurnId = call.TurnId,
+                Arguments = (JObject)call.Arguments.DeepClone(),
+            };
+            this.observer.OnToolCall(toolInteraction);
+
+            CodexDynamicToolResult result;
+            using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken,
+                toolCancellation);
+            try
+            {
+                result = await this.dynamicToolBridge.ExecuteAsync(call, linkedCancellation.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                result = CodexDynamicToolResult.Error("Canvas 도구 실행이 취소되었습니다.");
+            }
+            catch (Exception)
+            {
+                result = CodexDynamicToolResult.Error("Canvas 도구 실행 중 오류가 발생했습니다.");
+            }
+
+            this.observer.OnToolResult(new AIInteractionToolResult
+            {
+                Id = call.CallId,
+                Name = call.Tool,
+                TurnId = call.TurnId,
+                Result = result.Success
+                    ? (JObject)result.Payload.DeepClone()
+                    : new JObject { ["error"] = result.ErrorMessage },
+            });
+            await this.SendToolResultAsync(request.RequestId, result, CancellationToken.None).ConfigureAwait(false);
+        }
+
+        private Task SendToolResultAsync(
+            JToken requestId,
+            CodexDynamicToolResult result,
+            CancellationToken cancellationToken)
+        {
+            return this.transport.SendResponseAsync(requestId, result.ToResponse(), cancellationToken);
+        }
+
+        private void ReportDynamicToolsFallback()
+        {
+            lock (this.sync)
+            {
+                if (this.dynamicToolsFallbackReported)
+                {
+                    return;
+                }
+
+                this.dynamicToolsFallbackReported = true;
+                var status = new AIInteractionText
+                {
+                    Agent = AIAgent.System,
+                    Content = "현재 Codex CLI가 Canvas Dynamic Tools를 지원하지 않아 읽기 전용 대화 모드로 실행합니다.",
+                    TurnId = "codex-dynamic-tools-fallback",
+                };
+                this.history.Add(status);
+                this.UpdateLastReturn();
+                this.observer.OnInteractionCompleted(status);
             }
         }
 
