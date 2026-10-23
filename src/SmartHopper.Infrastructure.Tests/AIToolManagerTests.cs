@@ -18,6 +18,7 @@
 
 namespace SmartHopper.Infrastructure.Tests
 {
+    using System.Collections.Generic;
     using System.Threading.Tasks;
     using SmartHopper.Infrastructure.AICall.Core.Returns;
     using SmartHopper.Infrastructure.AITools;
@@ -49,6 +50,28 @@ namespace SmartHopper.Infrastructure.Tests
             Assert.Contains("TestTool", tools.Keys);
             Assert.Equal("Test Description", tools["TestTool"].Description);
             Assert.Equal("Test Category", tools["TestTool"].Category);
+        }
+
+        [Fact]
+        public void GetTools_ReusesReadOnlySnapshotUntilRegistryChanges()
+        {
+            AIToolManager.ResetTools();
+            var original = new AITool("SnapshotTool", "Original", "Test", "{}", _ => Task.FromResult(new AIReturn()));
+            AIToolManager.RegisterTool(original);
+
+            var first = AIToolManager.GetTools();
+            var second = AIToolManager.GetTools();
+
+            Assert.Same(first, second);
+            Assert.Throws<System.NotSupportedException>(() => ((IDictionary<string, AITool>)first).Add("Other", original));
+
+            var replacement = new AITool("SnapshotTool", "Replacement", "Test", "{}", _ => Task.FromResult(new AIReturn()));
+            AIToolManager.RegisterTool(replacement);
+            var updated = AIToolManager.GetTools();
+
+            Assert.NotSame(first, updated);
+            Assert.Equal("Original", first["SnapshotTool"].Description);
+            Assert.Same(replacement, updated["SnapshotTool"]);
         }
 
 #if NET7_WINDOWS

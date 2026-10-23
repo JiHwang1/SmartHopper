@@ -70,6 +70,50 @@ namespace SmartHopper.Infrastructure.Tests.AITools
         }
 
         [Fact]
+        public void Catalog_CachesSchemasWithoutLeakingMutableDescriptorsOrStaleTools()
+        {
+            var sourceCalls = 0;
+            var tool = new AITool("gh_get", "Read", "Test", "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}", _ => Task.FromResult(new AIReturn()), mutatesCanvas: false);
+            IReadOnlyDictionary<string, AITool> tools = new Dictionary<string, AITool> { [tool.Name] = tool };
+            var catalog = new AIToolExternalCatalog(() =>
+            {
+                sourceCalls++;
+                return tools;
+            });
+            var options = new AIToolExternalCatalogOptions();
+
+            var first = catalog.BuildDescriptors(options).Single();
+            first.InputSchema["properties"]!["q"]!["type"] = "integer";
+            var second = catalog.BuildDescriptors(options).Single();
+
+            Assert.Equal(2, sourceCalls);
+            Assert.Equal("string", (string?)second.InputSchema["properties"]?["q"]?["type"]);
+
+            var replacement = new AITool("gh_get", "Read", "Test", "{\"type\":\"object\",\"properties\":{\"count\":{\"type\":\"integer\"}}}", _ => Task.FromResult(new AIReturn()), mutatesCanvas: false);
+            tools = new Dictionary<string, AITool> { [replacement.Name] = replacement };
+            var replaced = catalog.BuildDescriptors(options).Single();
+
+            Assert.Equal("integer", (string?)replaced.InputSchema["properties"]?["count"]?["type"]);
+            Assert.Null(replaced.InputSchema["properties"]?["q"]);
+        }
+
+        [Fact]
+        public void Catalog_BuildDescriptorsReadsToolSourceOnce()
+        {
+            var sourceCalls = 0;
+            var catalog = new AIToolExternalCatalog(() =>
+            {
+                sourceCalls++;
+                return BuildCatalog(
+                    ("gh_get", false, true, "{\"type\":\"object\"}"),
+                    ("gh_list", false, true, "{\"type\":\"object\"}"));
+            });
+
+            Assert.Equal(2, catalog.BuildDescriptors(new AIToolExternalCatalogOptions()).Count);
+            Assert.Equal(1, sourceCalls);
+        }
+
+        [Fact]
         public void Catalog_DestructiveFilterOverridesAllowList()
         {
             var destructive = new AITool(

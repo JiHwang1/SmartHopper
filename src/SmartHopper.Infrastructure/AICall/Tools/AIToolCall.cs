@@ -103,7 +103,7 @@ namespace SmartHopper.Infrastructure.AICall.Tools
         /// <inheritdoc/>
         public override async Task<AIReturn> Exec(CancellationToken cancellationToken = default)
         {
-            // If a token was provided to Exec, use it to update the property so the tool manager can use it
+            // Preserve the caller's token when a per-execution linked token is installed below.
             if (cancellationToken != default)
             {
                 this.CancellationToken = cancellationToken;
@@ -137,51 +137,94 @@ namespace SmartHopper.Infrastructure.AICall.Tools
 
             try
             {
-                // Respect per-request timeout. We cannot cancel the underlying work if the tool ignores cancellation,
-                // but we do return a standardized timeout error when exceeded.
+                    // Cancellation is cooperative. Mutation calls retain ownership until their
+                    // underlying execution completes; non-mutating work may finish in the background.
                 // Resolution chain: explicit per-request value (when > 0) -> shared default.
                 // RequestTimeoutPolicy normally resolves this from settings before Exec() runs.
                 var timeoutSec = (this.TimeoutSeconds.HasValue && this.TimeoutSeconds.Value > 0)
                     ? this.TimeoutSeconds.Value
                     : DEFAULT_TIMEOUT_SECONDS;
                 var clampedTimeout = Math.Min(Math.Max(timeoutSec, MIN_TIMEOUT_SECONDS), MAX_TIMEOUT_SECONDS);
-                var execTask = AIToolManager.ExecuteTool(this);
-                var completed = await Task.WhenAny(
-                    execTask,
-                    Task.Delay(TimeSpan.FromSeconds(clampedTimeout))).ConfigureAwait(false);
-                if (completed != execTask)
-                {
-                    var timed = new AIReturn();
-                    timed.CreateToolError($"Tool execution exceeded {timeoutSec} seconds", this);
-                    return timed;
-                }
+                var originalToken = this.CancellationToken;
+                var executionCancellation = CancellationTokenSource.CreateLinkedTokenSource(originalToken);
+                executionCancellation.CancelAfter(TimeSpan.FromSeconds(clampedTimeout));
+                this.CancellationToken = executionCancellation.Token;
 
-                var result = await execTask.ConfigureAwait(false);
-                if (result == null)
+                var cleanupDeferred = false;
+                try
                 {
-                    var none = new AIReturn();
-                    none.CreateToolError("Tool execution returned no result", this);
-                    return none;
-                }
+                    var execTask = AIToolManager.ExecuteToolValidated(this);
+                    var cancellationTask = Task.Delay(Timeout.Infinite, executionCancellation.Token);
+                    var completed = await Task.WhenAny(execTask, cancellationTask).ConfigureAwait(false);
+                    if (completed != execTask)
+                    {
+                        var toolName = this.GetToolCall()?.Name;
+                        var mutatesCanvas = toolName != null &&
+                            AIToolManager.GetTools().TryGetValue(toolName, out var tool) && tool.MutatesCanvas;
+                        if (mutatesCanvas)
+                        {
+                            // Do not release a caller's mutation gate while a cancelled tool is
+                            // still executing. Cooperative cancellation cannot forcibly abort it.
+                            try { await execTask.ConfigureAwait(false); }
+                            catch (Exception) { /* The cancellation result below remains authoritative. */ }
+                        }
+                        else
+                        {
+                            cleanupDeferred = true;
+                            ObserveAndCleanup(execTask, executionCancellation, originalToken, this);
+                        }
+                        var cancelled = new AIReturn();
+                        var message = originalToken.IsCancellationRequested
+                            ? "Tool execution cancelled"
+                            : $"Tool execution exceeded {timeoutSec} seconds";
+                        cancelled.CreateToolError(message, this);
+                        return cancelled;
+                    }
 
-                // If the tool didn't provide a body and no error messages, standardize it
-                if (result.Body == null && !result.Messages.Any(m => m.Severity == SHRuntimeMessageSeverity.Error))
+                    var result = await execTask.ConfigureAwait(false);
+                    executionCancellation.Token.ThrowIfCancellationRequested();
+                    if (result == null)
+                    {
+                        var none = new AIReturn();
+                        none.CreateToolError("Tool execution returned no result", this);
+                        return none;
+                    }
+
+                    // If the tool didn't provide a body and no error messages, standardize it
+                    if (result.Body == null && !result.Messages.Any(m => m.Severity == SHRuntimeMessageSeverity.Error))
+                    {
+                        result.CreateToolError("Tool execution returned no result", this);
+                    }
+
+                    return result;
+                }
+                finally
                 {
-                    result.CreateToolError("Tool execution returned no result", this);
-                }
+                    if (!cleanupDeferred)
+                    {
+                        if (this.CancellationToken == executionCancellation.Token)
+                        {
+                            this.CancellationToken = originalToken;
+                        }
 
-                return result;
+                        executionCancellation.Dispose();
+                    }
+                }
             }
             catch (TaskCanceledException)
             {
                 var errorResult = new AIReturn();
-                errorResult.CreateToolError("Tool execution cancelled or timed out", this);
+                errorResult.CreateToolError(this.CancellationToken.IsCancellationRequested
+                    ? "Tool execution cancelled"
+                    : "Tool execution timed out", this);
                 return errorResult;
             }
             catch (OperationCanceledException)
             {
                 var errorResult = new AIReturn();
-                errorResult.CreateToolError("Tool execution cancelled or timed out", this);
+                errorResult.CreateToolError(this.CancellationToken.IsCancellationRequested
+                    ? "Tool execution cancelled"
+                    : "Tool execution timed out", this);
                 return errorResult;
             }
             catch (TimeoutException)
@@ -206,6 +249,25 @@ namespace SmartHopper.Infrastructure.AICall.Tools
                 errorResult.CreateToolError(raw, this);
                 return errorResult;
             }
+        }
+
+        private static void ObserveAndCleanup(Task<AIReturn> task, CancellationTokenSource cancellation, CancellationToken originalToken, AIToolCall toolCall)
+        {
+            _ = task.ContinueWith(
+                completedTask =>
+                {
+                    // Reading Exception observes failures from work that outlives this timeout response.
+                    _ = completedTask.Exception;
+                    if (toolCall.CancellationToken == cancellation.Token)
+                    {
+                        toolCall.CancellationToken = originalToken;
+                    }
+
+                    cancellation.Dispose();
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
         }
 
         /// <summary>

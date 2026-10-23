@@ -84,6 +84,8 @@ namespace SmartHopper.Infrastructure.AITools.External
     public sealed class AIToolExternalCatalog
     {
         private readonly Func<IReadOnlyDictionary<string, AITool>> toolSource;
+        private readonly object schemaCacheLock = new object();
+        private readonly Dictionary<string, CachedSchemas> schemaCache = new Dictionary<string, CachedSchemas>(StringComparer.Ordinal);
 
         public AIToolExternalCatalog()
             : this(() => AIToolManager.GetTools())
@@ -102,27 +104,55 @@ namespace SmartHopper.Infrastructure.AITools.External
                 throw new ArgumentNullException(nameof(options));
             }
 
-            return this.toolSource().Values
-                .Where(tool => this.IsExposed(tool.Name, options))
-                .Select(tool => new AIToolExternalDescriptor(
-                    tool,
-                    ParseSchema(tool.ParametersSchema),
-                    ParseSchema(tool.OutputSchema)))
-                .OrderBy(tool => tool.Name, StringComparer.Ordinal)
+            var tools = this.toolSource().Values.ToList();
+            var enabledTools = options.EnabledTools == null
+                ? null
+                : new HashSet<string>(options.EnabledTools, StringComparer.OrdinalIgnoreCase);
+            var hasAllowList = enabledTools != null && enabledTools.Count > 0;
+            var exposedTools = tools
+                .Where(tool => this.IsExposed(tool, tool.Name, options, enabledTools, hasAllowList))
                 .ToList();
+
+            lock (this.schemaCacheLock)
+            {
+                var currentNames = new HashSet<string>(tools.Select(tool => tool.Name), StringComparer.Ordinal);
+                foreach (var name in this.schemaCache.Keys.Where(name => !currentNames.Contains(name)).ToList())
+                {
+                    this.schemaCache.Remove(name);
+                }
+
+                return exposedTools
+                    .Select(tool =>
+                    {
+                        var schemas = this.GetSchemas(tool);
+                        return new AIToolExternalDescriptor(tool, (JObject)schemas.Input.DeepClone(), (JObject)schemas.Output.DeepClone());
+                    })
+                    .OrderBy(tool => tool.Name, StringComparer.Ordinal)
+                    .ToList();
+            }
         }
 
         public bool IsExposed(string toolName, AIToolExternalCatalogOptions options)
         {
-            if (!this.TryGetTool(toolName, out var tool) || !tool.Enabled)
+            if (!this.TryGetTool(toolName, out var tool))
             {
                 return false;
             }
 
-            var hasAllowList = options.EnabledTools != null && options.EnabledTools.Count > 0;
-            var isAllowed = !hasAllowList || options.EnabledTools!.Any(name =>
-                string.Equals(name, toolName, StringComparison.OrdinalIgnoreCase));
-            if (!isAllowed)
+            var enabledTools = options.EnabledTools == null
+                ? null
+                : new HashSet<string>(options.EnabledTools, StringComparer.OrdinalIgnoreCase);
+            return this.IsExposed(tool, toolName, options, enabledTools, enabledTools != null && enabledTools.Count > 0);
+        }
+
+        private bool IsExposed(AITool tool, string toolName, AIToolExternalCatalogOptions options, HashSet<string>? enabledTools, bool hasAllowList)
+        {
+            if (!tool.Enabled)
+            {
+                return false;
+            }
+
+            if (hasAllowList && !enabledTools!.Contains(toolName))
             {
                 return false;
             }
@@ -153,6 +183,21 @@ namespace SmartHopper.Infrastructure.AITools.External
             return this.toolSource().TryGetValue(toolName, out tool!);
         }
 
+        private CachedSchemas GetSchemas(AITool tool)
+        {
+            if (this.schemaCache.TryGetValue(tool.Name, out var cached) &&
+                ReferenceEquals(cached.Tool, tool) &&
+                string.Equals(cached.InputText, tool.ParametersSchema, StringComparison.Ordinal) &&
+                string.Equals(cached.OutputText, tool.OutputSchema, StringComparison.Ordinal))
+            {
+                return cached;
+            }
+
+            cached = new CachedSchemas(tool, tool.ParametersSchema, tool.OutputSchema, ParseSchema(tool.ParametersSchema), ParseSchema(tool.OutputSchema));
+            this.schemaCache[tool.Name] = cached;
+            return cached;
+        }
+
         private static JObject ParseSchema(string schema)
         {
             if (!string.IsNullOrWhiteSpace(schema))
@@ -171,6 +216,28 @@ namespace SmartHopper.Infrastructure.AITools.External
             }
 
             return new JObject { ["type"] = "object" };
+        }
+
+        private sealed class CachedSchemas
+        {
+            public CachedSchemas(AITool tool, string inputText, string outputText, JObject input, JObject output)
+            {
+                this.Tool = tool;
+                this.InputText = inputText;
+                this.OutputText = outputText;
+                this.Input = input;
+                this.Output = output;
+            }
+
+            public AITool Tool { get; }
+
+            public string InputText { get; }
+
+            public string OutputText { get; }
+
+            public JObject Input { get; }
+
+            public JObject Output { get; }
         }
     }
 

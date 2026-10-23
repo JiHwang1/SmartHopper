@@ -18,6 +18,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
@@ -37,6 +38,7 @@ namespace SmartHopper.Infrastructure.AITools
     {
         // Dictionary to store all available tools
         private static readonly Dictionary<string, AITool> _tools = new Dictionary<string, AITool>();
+        private static IReadOnlyDictionary<string, AITool>? _toolsSnapshot;
 
         // Lock to protect _tools and _toolsDiscovered from concurrent access. AIToolManager is a
         // static manager that may be used by multiple components and tests in parallel.
@@ -53,6 +55,7 @@ namespace SmartHopper.Infrastructure.AITools
             lock (_toolsLock)
             {
                 _tools.Clear();
+                _toolsSnapshot = null;
                 _toolsDiscovered = false;
             }
         }
@@ -65,6 +68,7 @@ namespace SmartHopper.Infrastructure.AITools
         private static void RegisterToolCore(AITool tool)
         {
             _tools[tool.Name] = tool;
+            _toolsSnapshot = null;
         }
 
         /// <summary>
@@ -89,7 +93,7 @@ namespace SmartHopper.Infrastructure.AITools
             {
                 // Ensure tools are discovered
                 DiscoverTools();
-                return new Dictionary<string, AITool>(_tools);
+                return _toolsSnapshot ?? (_toolsSnapshot = new ReadOnlyDictionary<string, AITool>(new Dictionary<string, AITool>(_tools)));
             }
         }
 
@@ -98,7 +102,17 @@ namespace SmartHopper.Infrastructure.AITools
         /// </summary>
         /// <param name="toolCall">The tool call to execute</param>
         /// <returns>The result of the tool execution</returns>
-        public static async Task<AIReturn> ExecuteTool(AIToolCall toolCall)
+        public static Task<AIReturn> ExecuteTool(AIToolCall toolCall)
+        {
+            return ExecuteToolCore(toolCall, validate: true);
+        }
+
+        internal static Task<AIReturn> ExecuteToolValidated(AIToolCall toolCall)
+        {
+            return ExecuteToolCore(toolCall, validate: false);
+        }
+
+        private static async Task<AIReturn> ExecuteToolCore(AIToolCall toolCall, bool validate)
         {
             var toolInfo = toolCall.GetToolCall();
 
@@ -109,25 +123,28 @@ namespace SmartHopper.Infrastructure.AITools
                 Request = toolCall,
             };
 
-            // Validate tool call
-            var (isValid, errors) = toolCall.IsValid();
-            if (!isValid)
+            // Public callers retain manager-level validation. AIToolCall.Exec already validated this request.
+            if (validate)
             {
-                var reasonList = (errors ?? new List<SHRuntimeMessage>())
-                    .Where(m => m != null && !string.IsNullOrWhiteSpace(m.Message))
-                    .Select(m => m.Message)
-                    .ToList();
-                var reasonText = reasonList.Count > 0 ? string.Join(" \n", reasonList) : "Tool call is invalid";
-                Debug.WriteLine($"[AIToolManager] Tool call is invalid: {reasonText}");
-
-                // Standardize as a tool error with structured messages for diagnostics/UI
-                output.CreateToolError(reasonText, toolCall);
-                if (errors != null && errors.Count > 0)
+                var (isValid, errors) = toolCall.IsValid();
+                if (!isValid)
                 {
-                    output.Messages = errors;
-                }
+                    var reasonList = (errors ?? new List<SHRuntimeMessage>())
+                        .Where(m => m != null && !string.IsNullOrWhiteSpace(m.Message))
+                        .Select(m => m.Message)
+                        .ToList();
+                    var reasonText = reasonList.Count > 0 ? string.Join(" \n", reasonList) : "Tool call is invalid";
+                    Debug.WriteLine($"[AIToolManager] Tool call is invalid: {reasonText}");
 
-                return output;
+                    // Standardize as a tool error with structured messages for diagnostics/UI
+                    output.CreateToolError(reasonText, toolCall);
+                    if (errors != null && errors.Count > 0)
+                    {
+                        output.Messages = errors;
+                    }
+
+                    return output;
+                }
             }
 
             // Ensure tools are discovered
