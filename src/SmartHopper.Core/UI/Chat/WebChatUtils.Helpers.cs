@@ -269,6 +269,16 @@ namespace SmartHopper.Core.UI.Chat
 
             Rhino.RhinoApp.InvokeOnUiThread(() =>
             {
+                var document = Instances.ActiveCanvas?.Document;
+                if (OpenDialogs.TryGetValue(componentId, out var existingDialog) &&
+                    existingDialog.ConnectedCanvasDocumentId != document?.DocumentID)
+                {
+                    // The Assistant dialog is keyed globally, but Canvas tools are bound to the
+                    // document captured when its session is created. Recreate a stale dialog so
+                    // opening or switching a Canvas cannot leave the chat without current tools.
+                    existingDialog.Close();
+                }
+
                 _ = OpenOrReuseDialogInternal(
                     request,
                     componentId,
@@ -280,7 +290,6 @@ namespace SmartHopper.Core.UI.Chat
                     out _,
                     observer =>
                     {
-                        var document = Instances.ActiveCanvas?.Document;
                         var canvasTools = document != null ? new CodexCanvasToolBridge(document) : null;
                         var session = new CodexConversationSession(
                             CodexAccountRuntime.ConversationTransport,

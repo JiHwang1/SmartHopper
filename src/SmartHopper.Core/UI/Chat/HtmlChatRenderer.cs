@@ -26,6 +26,7 @@ using System.Diagnostics;
 using System.Globalization;
 using Markdig;
 using SmartHopper.Infrastructure.AICall.Core.Interactions;
+using SmartHopper.Infrastructure.Diagnostics;
 
 namespace SmartHopper.Core.UI.Chat
 {
@@ -101,6 +102,12 @@ namespace SmartHopper.Core.UI.Chat
         /// <returns>HTML representation of the message.</returns>
         public string RenderInteraction(IAIInteraction interaction)
         {
+            if (interaction is AIInteractionRuntimeMessage diagnostic &&
+                (!diagnostic.Surfaceable || diagnostic.Severity < SHRuntimeMessageSeverity.Info))
+            {
+                return string.Empty;
+            }
+
             Debug.WriteLine($"[HtmlChatRenderer] Generating message HTML for agent: {interaction.Agent.ToString()}");
 
             try

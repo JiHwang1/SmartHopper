@@ -657,17 +657,24 @@ namespace SmartHopper.Core.UI
 
                 // Resolve provider and model from SmartHopperAssistant settings with fallbacks
                 var providerManager = ProviderManager.Instance;
-                var assistant = SmartHopperSettings.Instance?.SmartHopperAssistant;
+                var settings = SmartHopperSettings.Instance;
+                var assistant = settings?.SmartHopperAssistant;
 
                 var requestedProviderName = assistant?.AssistantProvider;
 
                 if (string.Equals(requestedProviderName, "Codex Account", StringComparison.Ordinal))
                 {
-                    var accountState = CodexAccountRuntime.Service.CurrentState;
+                    var accountService = CodexAccountRuntime.Service;
+                    await accountService.ConfigureAsync(
+                        settings?.CodexExecutablePath,
+                        settings?.CodexHome);
+                    await accountService.ConnectAsync();
+
+                    var accountState = accountService.CurrentState;
                     if (accountState.Status != CodexAccountStatus.SignedIn)
                     {
                         StyledMessageDialog.ShowError(
-                            "SmartHopper 설정의 Codex Account 탭에서 ChatGPT 로그인을 먼저 완료하세요.",
+                            accountState.UserMessage ?? "SmartHopper 설정의 Codex Account 탭에서 ChatGPT 로그인을 먼저 완료하세요.",
                             "SmartHopper Assistant");
                         return;
                     }

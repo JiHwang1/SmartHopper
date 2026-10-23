@@ -451,7 +451,7 @@ namespace SmartHopper.Core.UI.Chat
                                     {
                                         if (aggregatedText != null && this.ShouldRenderDelta(segKey, aggregatedText))
                                         {
-                                            this._dialog.UpsertMessageByKey(segKey, aggregatedText, source: "OnDelta:FirstRender");
+                                            this._dialog.UpsertMessageByKey(segKey, aggregatedText, source: "OnDelta:FirstRender", isStreaming: true);
                                         }
                                     }
                                 }
@@ -463,7 +463,7 @@ namespace SmartHopper.Core.UI.Chat
                                     {
                                         if (aggregatedText != null && this.ShouldRenderDelta(targetKey, aggregatedText))
                                         {
-                                            this._dialog.UpsertMessageByKey(targetKey, aggregatedText, source: "OnDelta");
+                                            this._dialog.UpsertMessageByKey(targetKey, aggregatedText, source: "OnDelta", isStreaming: true);
                                         }
                                     }
                                 }
@@ -616,7 +616,7 @@ namespace SmartHopper.Core.UI.Chat
                                     if (interaction is AIInteractionToolResult tr)
                                     {
                                         var followKey = GetFollowKeyForToolResult(tr);
-                                        this._dialog.UpsertMessageAfter(followKey, streamKey, tr, source: "OnInteractionCompletedToolResult");
+                                        this._dialog.UpsertMessageAfter(followKey, streamKey, tr);
                                     }
                                     else
                                     {
@@ -790,9 +790,6 @@ namespace SmartHopper.Core.UI.Chat
                         DebugLog($"[WebChatObserver] OnFinal finalize UI error: {repEx.Message}");
                     }
 
-                    // Now that final assistant is rendered, remove the thinking bubble and set status
-                    this.RemoveThinkingBubbleIfActive();
-
                     // Notify listeners with session-managed snapshots
                     this._dialog.ChatUpdated?.Invoke(this._dialog, historySnapshot);
 
@@ -800,7 +797,11 @@ namespace SmartHopper.Core.UI.Chat
                     this._dialog.ResponseReceived?.Invoke(this._dialog, lastReturn);
 
                     // Turn is complete and stable - exit processing state and ready for next user message
-                    this._dialog.ExecuteScript("setStatus('Ready'); setProcessing(false);");
+                    _ = this._dialog.FinishRenderingAsync(() =>
+                    {
+                        this.RemoveThinkingBubbleIfActive();
+                        this._dialog.ExecuteScript("setStatus('Ready'); setProcessing(false);");
+                    });
                 });
             }
 
@@ -815,6 +816,11 @@ namespace SmartHopper.Core.UI.Chat
                 {
                     try
                     {
+                        // Codex cancellation/errors do not emit OnFinal. Resubmit every latest
+                        // aggregate losslessly before the error marker, including skipped deltas.
+                        this.FlushPendingTextStateForTurn(null);
+                        foreach (var turn in this._turnStates.Values) turn.IsFinalized = true;
+
                         // For all errors (including cancellations), render as an error-severity diagnostic (red-styled)
                         var isCancel = ex is OperationCanceledException;
                         var errInteraction = new AIInteractionRuntimeMessage
@@ -843,7 +849,8 @@ namespace SmartHopper.Core.UI.Chat
 
                         // After rendering the error, update status and stop processing (removes loader via JS helper)
                         var status = isCancel ? "Cancelled" : "Error";
-                        this._dialog.ExecuteScript($"setStatus('{status}'); setProcessing(false);");
+                        _ = this._dialog.FinishRenderingAsync(() =>
+                            this._dialog.ExecuteScript($"setStatus('{status}'); setProcessing(false);"));
                     }
                     catch (Exception uiEx)
                     {
@@ -939,35 +946,17 @@ namespace SmartHopper.Core.UI.Chat
             }
 
             /// <summary>
-            /// Flushes any pending (throttled) text state for a turn to ensure final content is rendered.
-            /// Called before processing non-text interactions to prevent losing throttled text deltas.
+            /// Flushes cumulative text losslessly before non-text interactions or terminal errors.
+            /// A null turn key flushes the current run, including deltas already marked as attempted.
             /// </summary>
-            private void FlushPendingTextStateForTurn(string turnKey)
+            private void FlushPendingTextStateForTurn(string? turnKey)
             {
-                if (string.IsNullOrWhiteSpace(turnKey))
-                {
-                    return;
-                }
-
                 try
                 {
-                    // Find all streams for this turn and force-render any that have dirty state
-                    var turnPrefix = turnKey + ":";
-                    foreach (var kv in this._streams)
-                    {
-                        var streamKey = kv.Key;
-                        if (string.IsNullOrWhiteSpace(streamKey) || !streamKey.StartsWith(turnPrefix, StringComparison.Ordinal))
-                        {
-                            continue;
-                        }
-
-                        if (kv.Value?.Aggregated is AIInteractionText aggregatedText && HasRenderableText(aggregatedText) && this.ShouldRenderDelta(streamKey, aggregatedText))
-                        {
-                            DebugLog($"[WebChatObserver] FlushPendingTextStateForTurn: flushing streamKey={streamKey}");
-
-                            this._dialog.UpsertMessageByKey(streamKey, aggregatedText, source: "FlushPendingText");
-                        }
-                    }
+                    ChatStreamFlush.Flush(
+                        this._streams.Select(kv => new KeyValuePair<string, IAIInteraction>(kv.Key, kv.Value?.Aggregated)),
+                        (key, text) => this._dialog.UpsertMessageByKey(key, text, source: "FlushPendingText"),
+                        turnKey);
                 }
                 catch (Exception ex)
                 {

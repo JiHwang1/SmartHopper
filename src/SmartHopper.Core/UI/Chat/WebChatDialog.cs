@@ -78,30 +78,22 @@ namespace SmartHopper.Core.UI.Chat
         private bool _updatingCodexSelectors;
 
         // Keeps last-rendered HTML per DOM key to make upserts idempotent and avoid redundant DOM work
-        // Uses LRU eviction to prevent unbounded growth in long conversations
+        // Uses FIFO eviction to prevent unbounded growth in long conversations
         private readonly Dictionary<string, string> _lastDomHtmlByKey = new Dictionary<string, string>(StringComparer.Ordinal);
-        private readonly Queue<string> _lruQueue = new Queue<string>();
+        private readonly Queue<string> _idempotencyFifo = new Queue<string>();
         private const int MaxIdempotencyCacheSize = 100;
-
-        // Key length and performance monitoring
-        private int _maxKeyLengthSeen = 0;
-        private long _totalEqualityChecks = 0;
-        private long _totalEqualityCheckMs = 0;
 
         // ConversationSession manages all history and requests
         // WebChatDialog is now a pure UI consumer
         private bool _isDomUpdating;
         private readonly Queue<Action> _domUpdateQueue = new Queue<Action>();
-        private readonly Dictionary<string, Action> _keyedDomUpdateLatest = new Dictionary<string, Action>(StringComparer.Ordinal);
-        private readonly Queue<string> _keyedDomUpdateQueue = new Queue<string>();
 
         private int _activeScripts;
 
         private readonly object _htmlRenderLock = new object();
 
-        private readonly object _renderVersionLock = new object();
-
-        private readonly Dictionary<string, long> _renderVersionByDomKey = new Dictionary<string, long>(StringComparer.Ordinal);
+        private readonly ChatRenderScheduler _renderScheduler = new ChatRenderScheduler();
+        private volatile bool _isClosing;
 
         // When the user is moving/resizing the window, defer DOM updates to avoid UI-thread stalls.
         private DateTime _deferDomUpdatesUntilUtc = DateTime.MinValue;
@@ -121,15 +113,11 @@ namespace SmartHopper.Core.UI.Chat
         private readonly bool _generateGreeting;
 
         /// <summary>
-        /// Minimum diagnostic severity to surface in the chat UI. Runtime-message interactions
-        /// (<see cref="AIInteractionRuntimeMessage"/>) whose severity is below this threshold,
-        /// or whose <see cref="AIInteractionRuntimeMessage.Surfaceable"/> flag is false, should be
-        /// hidden from rendering. Defaults to <see cref="SHRuntimeMessageSeverity.Info"/> so Debug
-        /// entries are hidden while Info/Warning/Error remain visible.
-        /// Note: the filtering is prepared here but not yet wired into the render path — consumers
-        /// (observer/renderer) will read this value in a follow-up to implement the actual filter.
+        /// Gets the Grasshopper document currently bound to this dialog's Canvas tools.
+        /// A null value means that the dialog was created without an active Canvas.
         /// </summary>
-        private SHRuntimeMessageSeverity _minimumSurfaceSeverity = SHRuntimeMessageSeverity.Info;
+        internal Guid? ConnectedCanvasDocumentId =>
+            (this._currentSession as ICodexCanvasToolSession)?.CanvasTools?.DocumentId;
 
         [Conditional("DEBUG")]
         private static void DebugLog(string message)
@@ -185,6 +173,10 @@ namespace SmartHopper.Core.UI.Chat
                     {
                         canvasSession.CanvasTools.ApprovalHandler = this.RequestCanvasToolApprovalAsync;
                         this.PopulateCanvasToolConfiguration(canvasSession.CanvasTools);
+                    }
+                    else if (this._codexCanvasStatus != null)
+                    {
+                        this._codexCanvasStatus.Text = "연결 안 됨: 활성 Grasshopper Canvas가 없습니다.";
                     }
                     _ = this.LoadCodexConfigurationAsync(codexSession);
                 }
@@ -306,7 +298,7 @@ namespace SmartHopper.Core.UI.Chat
             bridge.BuildDynamicTools();
             this._codexEditingModeDropDown.SelectedIndex = 0;
             this._codexEditingModeDropDown.Enabled = true;
-            this._codexCanvasStatus.Text = $"연결: {bridge.CanvasName} · 사용 가능 도구 {bridge.AvailableToolCount}개 · 변경 전 확인: 켜짐";
+            this._codexCanvasStatus.Text = $"연결: {bridge.CanvasName} · 읽기 전용 · 도구 {bridge.AvailableToolCount}개";
             this._codexEditingModeDropDown.SelectedIndexChanged += (_, __) =>
             {
                 bridge.EditingMode = this._codexEditingModeDropDown.SelectedKey == "ConfirmChanges"
@@ -568,89 +560,14 @@ namespace SmartHopper.Core.UI.Chat
         /// <param name="followKey">The DOM key of the message after which the new/upserted message should be placed.</param>
         /// <param name="domKey">The stable DOM key used to perform an idempotent upsert of the message.</param>
         /// <param name="interaction">The interaction to render into HTML and insert into the DOM.</param>
-        /// <param name="source">Optional source identifier for logging and diagnostics.</param>
-        private void UpsertMessageAfter(string followKey, string domKey, IAIInteraction interaction, string? source = null)
+        private void UpsertMessageAfter(string followKey, string domKey, IAIInteraction interaction)
         {
             if (interaction == null || string.IsNullOrWhiteSpace(domKey))
             {
                 return;
             }
 
-            var renderVersion = this.NextRenderVersion(domKey);
-            Task.Run(() =>
-            {
-                string html;
-                try
-                {
-                    lock (this._htmlRenderLock)
-                    {
-                        html = this._htmlRenderer.RenderInteraction(interaction);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    DebugLog($"[WebChatDialog] UpsertMessageAfter render error: {ex.Message}");
-                    return;
-                }
-
-                if (!this.IsLatestRenderVersion(domKey, renderVersion))
-                {
-                    return;
-                }
-
-                this.RunWhenWebViewReady(domKey, () =>
-                {
-                    if (!this.IsLatestRenderVersion(domKey, renderVersion))
-                    {
-                        return;
-                    }
-
-#if DEBUG
-                    var preview = html != null ? (html.Length > 120 ? html.Substring(0, 120) + "..." : html) : "(null)";
-#endif
-
-                    // Monitor key length
-                    this.MonitorKeyLength(domKey);
-                    this.MonitorKeyLength(followKey);
-
-                    // Performance profiling for HTML equality check
-                    if (!string.IsNullOrEmpty(domKey) && html != null && this._lastDomHtmlByKey.TryGetValue(domKey, out var last))
-                    {
-                        bool isEqual;
-#if DEBUG
-                        var sw = System.Diagnostics.Stopwatch.StartNew();
-                        isEqual = string.Equals(last, html, StringComparison.Ordinal);
-                        sw.Stop();
-                        this._totalEqualityChecks++;
-                        this._totalEqualityCheckMs += sw.ElapsedMilliseconds;
-#else
-                        isEqual = string.Equals(last, html, StringComparison.Ordinal);
-#endif
-
-                        if (isEqual)
-                        {
-#if DEBUG
-                            DebugLog($"[WebChatDialog] UpsertMessageAfter (skipped identical) fk={followKey} key={domKey} agent={interaction.Agent} len={html.Length} src={source ?? "?"} eqCheckMs={sw.ElapsedMilliseconds}");
-#endif
-                            return;
-                        }
-                    }
-
-#if DEBUG
-                    DebugLog($"[WebChatDialog] UpsertMessageAfter fk={followKey} key={domKey} agent={interaction.Agent} type={interaction.GetType().Name} htmlLen={html?.Length ?? 0} src={source ?? "?"} preview={preview}");
-
-                    if (string.IsNullOrWhiteSpace(followKey))
-                    {
-                        DebugLog($"[WebChatDialog] UpsertMessageAfter WARNING: followKey is null/empty for key={domKey}, will fallback to normal upsert");
-                    }
-
-#endif
-
-                    var script = $"upsertMessageAfter({JsonConvert.SerializeObject(followKey)}, {JsonConvert.SerializeObject(domKey)}, {JsonConvert.SerializeObject(html)});";
-                    this.UpdateIdempotencyCache(domKey, html ?? string.Empty);
-                    this.ExecuteScript(script);
-                });
-            });
+            _ = this.QueueInteractionRenderAsync(domKey, interaction, followKey);
         }
 
         /// <summary>
@@ -715,54 +632,15 @@ namespace SmartHopper.Core.UI.Chat
         /// <param name="action">The action to execute once the WebView is ready.</param>
         private void RunWhenWebViewReady(Action action)
         {
-            if (action == null)
+            if (action == null || this._isClosing)
             {
                 return;
             }
 
             void EnqueueAndScheduleDrain()
             {
+                if (this._isClosing) return;
                 this._domUpdateQueue.Enqueue(action);
-                this.ScheduleDomDrain();
-            }
-
-            if (this._webViewInitialized)
-            {
-                RhinoApp.InvokeOnUiThread(EnqueueAndScheduleDrain);
-            }
-            else
-            {
-                this._webViewInitializedTcs.Task.ContinueWith(
-                    _ => RhinoApp.InvokeOnUiThread(EnqueueAndScheduleDrain),
-                    System.Threading.CancellationToken.None,
-                    TaskContinuationOptions.None,
-                    TaskScheduler.Default);
-            }
-        }
-
-        private void RunWhenWebViewReady(string domKey, Action action)
-        {
-            if (action == null)
-            {
-                return;
-            }
-
-            void EnqueueAndScheduleDrain()
-            {
-                if (string.IsNullOrWhiteSpace(domKey))
-                {
-                    this._domUpdateQueue.Enqueue(action);
-                    this.ScheduleDomDrain();
-                    return;
-                }
-
-                var isNewKey = !this._keyedDomUpdateLatest.ContainsKey(domKey);
-                this._keyedDomUpdateLatest[domKey] = action;
-                if (isNewKey)
-                {
-                    this._keyedDomUpdateQueue.Enqueue(domKey);
-                }
-
                 this.ScheduleDomDrain();
             }
 
@@ -801,7 +679,7 @@ namespace SmartHopper.Core.UI.Chat
         /// </summary>
         private void ScheduleDomDrain()
         {
-            if (this._domDrainScheduled)
+            if (this._domDrainScheduled || this._isClosing)
             {
                 return;
             }
@@ -825,6 +703,7 @@ namespace SmartHopper.Core.UI.Chat
             try
             {
                 this._domDrainScheduled = false;
+                if (this._isClosing) return;
 
                 if (DateTime.UtcNow < this._deferDomUpdatesUntilUtc)
                 {
@@ -847,35 +726,16 @@ namespace SmartHopper.Core.UI.Chat
                 try
                 {
                     int executed = 0;
-                    while (executed < DomDrainBatchSize && (this._domUpdateQueue.Count > 0 || this._keyedDomUpdateQueue.Count > 0))
+                    while (executed < DomDrainBatchSize && this._domUpdateQueue.Count > 0)
                     {
-                        if (this._keyedDomUpdateQueue.Count > 0)
+                        var next = this._domUpdateQueue.Dequeue();
+                        try
                         {
-                            var domKey = this._keyedDomUpdateQueue.Dequeue();
-                            try
-                            {
-                                if (!string.IsNullOrWhiteSpace(domKey) && this._keyedDomUpdateLatest.TryGetValue(domKey, out var keyedAction))
-                                {
-                                    this._keyedDomUpdateLatest.Remove(domKey);
-                                    keyedAction?.Invoke();
-                                }
-                            }
-                            catch (Exception ex)
-                            {
-                                DebugLog($"[WebChatDialog] DOM keyed action error: {ex.Message}");
-                            }
+                            next?.Invoke();
                         }
-                        else
+                        catch (Exception ex)
                         {
-                            var next = this._domUpdateQueue.Dequeue();
-                            try
-                            {
-                                next?.Invoke();
-                            }
-                            catch (Exception ex)
-                            {
-                                DebugLog($"[WebChatDialog] DOM queued action error: {ex.Message}");
-                            }
+                            DebugLog($"[WebChatDialog] DOM queued action error: {ex.Message}");
                         }
 
                         executed++;
@@ -887,7 +747,7 @@ namespace SmartHopper.Core.UI.Chat
                 }
 
                 // If there is more work, schedule another drain.
-                if (this._domUpdateQueue.Count > 0 || this._keyedDomUpdateQueue.Count > 0)
+                if (this._domUpdateQueue.Count > 0)
                 {
                     this.ScheduleDomDrain();
                 }
@@ -906,7 +766,7 @@ namespace SmartHopper.Core.UI.Chat
         /// <param name="script">The JavaScript code to execute.</param>
         private void ExecuteScript(string script)
         {
-            if (string.IsNullOrWhiteSpace(script))
+            if (string.IsNullOrWhiteSpace(script) || this._isClosing)
             {
                 return;
             }
@@ -927,6 +787,7 @@ namespace SmartHopper.Core.UI.Chat
                 {
                     Application.Instance?.AsyncInvoke(() =>
                     {
+                        if (this._isClosing) return;
                         var entered = false;
                         try
                         {
@@ -974,35 +835,7 @@ namespace SmartHopper.Core.UI.Chat
                 return;
             }
 
-            Task.Run(() =>
-            {
-                string html;
-                try
-                {
-                    lock (this._htmlRenderLock)
-                    {
-                        html = this._htmlRenderer.RenderInteraction(interaction);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    DebugLog($"[WebChatDialog] AddInteractionToWebView render error: {ex.Message}");
-                    return;
-                }
-
-                this.RunWhenWebViewReady(() =>
-                {
-#if DEBUG
-                    var preview = html != null ? (html.Length > 120 ? html.Substring(0, 120) + "..." : html) : "(null)";
-                    DebugLog($"[WebChatDialog] AddInteractionToWebView agent={interaction.Agent} type={interaction.GetType().Name} htmlLen={html?.Length ?? 0} preview={preview}");
-#endif
-                    var script = $"addMessage({JsonConvert.SerializeObject(html)});";
-#if DEBUG
-                    DebugLog($"[WebChatDialog] ExecuteScript addMessage len={script.Length} preview={(script.Length > 140 ? script.Substring(0, 140) + "..." : script)}");
-#endif
-                    this.ExecuteScript(script);
-                });
-            });
+            _ = this.QueueInteractionRenderAsync(null, interaction);
         }
 
         /// <summary>
@@ -1012,7 +845,7 @@ namespace SmartHopper.Core.UI.Chat
         /// <param name="domKey">The stable DOM key used to insert or replace the message.</param>
         /// <param name="interaction">The interaction to render and upsert.</param>
         /// <param name="source">Optional source identifier for logging and diagnostics.</param>
-        private void UpsertMessageByKey(string domKey, IAIInteraction interaction, string? source = null)
+        private void UpsertMessageByKey(string domKey, IAIInteraction interaction, string? source = null, bool isStreaming = false)
         {
             if (interaction == null || string.IsNullOrWhiteSpace(domKey)) return;
 
@@ -1028,51 +861,11 @@ namespace SmartHopper.Core.UI.Chat
                 return;
             }
 
-            var renderVersion = this.NextRenderVersion(domKey);
-            Task.Run(() =>
-            {
-                string html;
-                try
-                {
-                    lock (this._htmlRenderLock)
-                    {
-                        html = this._htmlRenderer.RenderInteraction(interaction);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    DebugLog($"[WebChatDialog] UpsertMessageByKey render error: {ex.Message}");
-                    return;
-                }
-
-                if (!this.IsLatestRenderVersion(domKey, renderVersion))
-                {
-                    return;
-                }
-
-                this.RunWhenWebViewReady(domKey, () =>
-                {
-                    if (!this.IsLatestRenderVersion(domKey, renderVersion))
-                    {
-                        return;
-                    }
-
-#if DEBUG
-                    var preview = html != null ? (html.Length > 120 ? html.Substring(0, 120) + "..." : html) : "(null)";
-                    DebugLog($"[WebChatDialog] UpsertMessageByKey key={domKey} agent={interaction.Agent} type={interaction.GetType().Name} htmlLen={html?.Length ?? 0} src={source ?? "?"} preview={preview}");
-#endif
-                    var script = $"upsertMessage({JsonConvert.SerializeObject(domKey)}, {JsonConvert.SerializeObject(html)});";
-#if DEBUG
-                    DebugLog($"[WebChatDialog] ExecuteScript upsertMessage len={script.Length} preview={(script.Length > 160 ? script.Substring(0, 160) + "..." : script)}");
-#endif
-                    this.UpdateIdempotencyCache(domKey, html ?? string.Empty);
-                    this.ExecuteScript(script);
-                });
-            });
+            _ = this.QueueInteractionRenderAsync(domKey, interaction, isStreaming: isStreaming);
         }
 
         /// <summary>
-        /// Updates the idempotency cache with LRU eviction to prevent unbounded growth.
+        /// Updates the idempotency cache with FIFO eviction to prevent unbounded growth.
         /// </summary>
         /// <param name="key">The DOM key.</param>
         /// <param name="html">The HTML content.</param>
@@ -1080,22 +873,22 @@ namespace SmartHopper.Core.UI.Chat
         {
             try
             {
-                // If key already exists, we don't need to track it again in LRU queue
+                // If key already exists, we don't need to track it again in FIFO queue
                 bool isExisting = this._lastDomHtmlByKey.ContainsKey(key);
 
                 this._lastDomHtmlByKey[key] = html;
 
                 if (!isExisting)
                 {
-                    this._lruQueue.Enqueue(key);
+                    this._idempotencyFifo.Enqueue(key);
 
                     // Evict oldest entry if cache exceeds max size
-                    while (this._lruQueue.Count > MaxIdempotencyCacheSize)
+                    while (this._idempotencyFifo.Count > MaxIdempotencyCacheSize)
                     {
-                        var oldest = this._lruQueue.Dequeue();
+                        var oldest = this._idempotencyFifo.Dequeue();
                         this._lastDomHtmlByKey.Remove(oldest);
 #if DEBUG
-                        DebugLog($"[WebChatDialog] LRU eviction: removed key={oldest} (cache size was {this._lruQueue.Count + 1})");
+                        DebugLog($"[WebChatDialog] FIFO eviction: removed key={oldest} (cache size was {this._idempotencyFifo.Count + 1})");
 #endif
                     }
                 }
@@ -1103,55 +896,6 @@ namespace SmartHopper.Core.UI.Chat
             catch (Exception ex)
             {
                 DebugLog($"[WebChatDialog] UpdateIdempotencyCache error: {ex.Message}");
-            }
-        }
-
-        /// <summary>
-        /// Monitors key length and logs warnings for unusually long keys.
-        /// </summary>
-        /// <param name="key">The key to monitor.</param>
-        private void MonitorKeyLength(string key)
-        {
-            if (string.IsNullOrEmpty(key))
-            {
-                return;
-            }
-
-            try
-            {
-                int len = key.Length;
-                if (len > this._maxKeyLengthSeen)
-                {
-                    this._maxKeyLengthSeen = len;
-#if DEBUG
-                    DebugLog($"[WebChatDialog] New max key length: {len} chars - key preview: {(len > 80 ? key.Substring(0, 80) + "..." : key)}");
-#endif
-
-                    if (len > 256)
-                    {
-#if DEBUG
-                        DebugLog($"[WebChatDialog] WARNING: Key length ({len}) exceeds recommended limit (256). Full key: {key}");
-#endif
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                DebugLog($"[WebChatDialog] MonitorKeyLength error: {ex.Message}");
-            }
-        }
-
-        /// <summary>
-        /// Logs performance statistics for idempotency checks.
-        /// </summary>
-        private void LogPerformanceStats()
-        {
-            if (this._totalEqualityChecks > 0)
-            {
-                var avgMs = (double)this._totalEqualityCheckMs / this._totalEqualityChecks;
-#if DEBUG
-                DebugLog($"[WebChatDialog] Performance Stats: {this._totalEqualityChecks} equality checks, {this._totalEqualityCheckMs}ms total, {avgMs:F3}ms avg, max key length: {this._maxKeyLengthSeen}");
-#endif
             }
         }
 
@@ -1180,6 +924,7 @@ namespace SmartHopper.Core.UI.Chat
                     try
                     {
                         this._lastDomHtmlByKey.Clear();
+                        this._idempotencyFifo.Clear();
                     }
                     catch
                     {
@@ -1299,6 +1044,8 @@ namespace SmartHopper.Core.UI.Chat
                             prevKey = null;
                             continue;
                         }
+
+                        if (string.IsNullOrEmpty(html)) continue;
 
                         // Keep host-side idempotency cache in sync
                         try
@@ -1513,7 +1260,7 @@ namespace SmartHopper.Core.UI.Chat
                 try
                 {
                     this.AddSystemMessage($"Error: {ex.Message}", "error");
-                    this.RunWhenWebViewReady(() => this.ExecuteScript("setStatus('Error'); setProcessing(false);"));
+                    _ = this.FinishRenderingAsync(() => this.ExecuteScript("setStatus('Error'); setProcessing(false);"));
                     this.BuildAndEmitSnapshot();
                 }
                 catch (Exception rex)
@@ -1536,7 +1283,7 @@ namespace SmartHopper.Core.UI.Chat
                 this._currentCts = null;
 
                 // Leave processing state: re-enable input/send, disable cancel in the web UI
-                this.RunWhenWebViewReady(() => this.ExecuteScript("setProcessing(false);"));
+                _ = this.FinishRenderingAsync(() => this.ExecuteScript("setProcessing(false);"));
 
                 // Keep the session alive for reuse - do not set to null
             }
@@ -1751,6 +1498,10 @@ namespace SmartHopper.Core.UI.Chat
             try
             {
                 DebugLog("[WebChatDialog] Dialog closing, cancelling ongoing AI calls");
+                this._isClosing = true;
+                this._renderScheduler.Dispose();
+                this._domUpdateQueue.Clear();
+                this._webViewInitializedTcs.TrySetCanceled();
                 this.CancelChat();
                 if (this._currentSession is IDisposable disposableSession)
                 {
@@ -1779,11 +1530,8 @@ namespace SmartHopper.Core.UI.Chat
                         try
                         {
                             this._lastDomHtmlByKey.Clear();
-                            this._lruQueue.Clear();
-                            this._renderVersionByDomKey.Clear();
-                            this._maxKeyLengthSeen = 0;
-                            this._totalEqualityChecks = 0;
-                            this._totalEqualityCheckMs = 0;
+                            this._idempotencyFifo.Clear();
+                            this._renderScheduler.Reset();
                         }
                         catch
                         {
@@ -1933,6 +1681,8 @@ namespace SmartHopper.Core.UI.Chat
                                 continue;
                             }
 
+                            if (string.IsNullOrEmpty(html)) continue;
+
                             // Compare hash with cached version
                             if (this._lastDomHtmlByKey.TryGetValue(domKey, out var cachedHtml))
                             {
@@ -2015,33 +1765,5 @@ namespace SmartHopper.Core.UI.Chat
             }
         }
 
-        private long NextRenderVersion(string domKey)
-        {
-            if (string.IsNullOrWhiteSpace(domKey))
-            {
-                return 0;
-            }
-
-            lock (this._renderVersionLock)
-            {
-                this._renderVersionByDomKey.TryGetValue(domKey, out var current);
-                current++;
-                this._renderVersionByDomKey[domKey] = current;
-                return current;
-            }
-        }
-
-        private bool IsLatestRenderVersion(string domKey, long version)
-        {
-            if (string.IsNullOrWhiteSpace(domKey) || version <= 0)
-            {
-                return true;
-            }
-
-            lock (this._renderVersionLock)
-            {
-                return this._renderVersionByDomKey.TryGetValue(domKey, out var current) && current == version;
-            }
-        }
     }
 }
