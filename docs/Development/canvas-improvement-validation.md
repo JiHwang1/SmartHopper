@@ -62,3 +62,13 @@ Example of limited evidence that does not prove full content or placement correc
 ### Deferred measurements
 
 Only the detached graph calculation belongs off the UI thread. Keep Rhino/Grasshopper-aware refinements and native mutations on the UI thread. The native multi-chat, render saturation/cancellation/error, and batch lifecycle checks above have not been run in Rhino/WebChat. Measure UI responsiveness and layout time on representative large definitions before claiming a speedup; do not infer one from source changes or unit-test results.
+
+### A-group acceptance checks
+
+1. Call gh_put without editMode using a live instanceGuid. Confirm the same GUID is updated, an omitted pivot preserves its position, external wires survive, and declined updates retain the original rather than creating a duplicate.
+2. Repeat an identical put, then submit mixed new/unchanged/updated components with document-scoped connections. Check createdInstanceGuids, updatedInstanceGuids, acceptedChanges, alreadySatisfiedChanges, and rejectedChanges against actual objects, wires, and groups. Connections to unchanged members must remain addressable.
+3. Use an invalid component type as a replacement, induce a placement failure, and cancel while approval is pending. Originals must survive failures and neither the wrong document nor protected objects may change. Check Undo after successful edits and restoration.
+4. Tidy a mixed selection of components, panels, sliders, and floating parameters. Inspect bounds-center alignment and pivots. Repeat the layout, confirm movements below 0.5 units create no movement Undo, and move an object while computation is pending to check stale-target rejection.
+5. Render malicious Markdown/HTML (script tags, event attributes, javascript links, SVG, forms, and frames) and verify it cannot execute or navigate the WebView. Confirm normal Markdown, code copying, tool cards, Send/Clear/Cancel, and partial/final streaming still work with the local sanitizer and CSP.
+
+The GhJSON 1.2.0 adapter now captures native bounds/port metrics on the UI thread and runs the shared dependency/refinement pipeline over detached values. The older 1.1.1-specific refinement description above is historical. These native checks remain unexecuted until explicitly run in a disposable Rhino document.

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve per-step provider/model routing in modality fallbacks; normalize multipart transcription, binary speech responses, and OpenAI-compatible chat audio.
+
+- Recover abandoned tool-call history without replaying mutations; disable tool exposure when tool processing is off.
+- Reject stale debounce callbacks after cancellation, restart, immediate transitions, or disposal.
+- Preserve distinct structured errors, avoid normal finish states on failures, and split OpenAI-compatible reasoning/generation usage without billing local tool timing as provider work.
+- Apply matching `gh_put` instance GUIDs as updates, retain omitted pivots and existing wires, restore failed replacements, and report applied/unapplied counts separately.
+- Convert shared layout centers to object-specific pivots and skip sub-pixel movements before recording Undo.
+- Return no usable value on secret-decryption failure, preserve unreadable migration data, sanitize chat HTML with local DOMPurify, and restrict WebView navigation.
 - Recheck Canvas document, selection, and permissions after approval; retain document and cancellation checks across queued mutations and script replacement.
 - Verify Canvas tool postconditions for moves, locks, previews, connections, and groups; distinguish observed changes from fully verified requested states.
 - Enforce JSON Schema constraints for AI responses and tool arguments, including nested required fields, types, enum values, and numeric limits.
@@ -17,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Advertise four `gh_get` queries with summary, filters, and field projection while retaining executable compatibility aliases.
+- Review staged Canvas edits before applying them, revalidate document and object identity after review, and group each operation's Undo records.
+
+- Upgrade GhJSON.Core and GhJSON.Grasshopper together to 1.2.0 for shared layout and detached native metrics; keep UI geometry capture and mutation on the UI thread.
 - Reuse provider HTTP connection pools while preserving client-specific authentication, headers, and timeouts.
 - Share provider schema wrapping and boolean component result parsing; preserve existing component identifiers and outputs.
 - Consolidate Panel alignment compatibility normalization at the GhJSON handler boundary and restore the validating library writer.
@@ -28,6 +40,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reuse read-only tool-registry snapshots and parsed external tool schemas; share JSON-RPC 2.0 envelope construction across MCP and Codex transports.
 
 ### Added
+
+- Add reviewed `gh_set_value` and `gh_run`, Canvas and viewport screenshots with image-bearing tool results, and bounded selection/viewport context.
+- Add document list, switch, new, open, and paginated read tools, plus saving non-active documents with explicit confirmation and document binding.
+- Track conversation-owned document baselines and structural changes between requests; add plan approval, progress cards, and per-run time/token budgets for ordinary and Codex chats.
+- Serve embedded MCP knowledge resources and five reusable prompts through the shared JSON-RPC dispatcher.
 
 - **Codex Account**: Codex app-server에 OAuth를 위임하는 독립 계정 탭을 추가해 Codex CLI 탐색, ChatGPT 로그인·취소·상태 새로고침·로그아웃을 지원합니다. SmartHopper는 OAuth 토큰을 직접 읽거나 저장하지 않습니다.
 - **Codex AI components**: Canvas Assistant의 모델·추론 수준을 공용 실행 프로필로 저장하고, 기본 Provider를 사용하는 텍스트 AI 컴포넌트를 같은 Codex app-server 및 ChatGPT 플랜으로 실행할 수 있습니다. 명시적으로 선택한 기존 Provider는 유지됩니다.

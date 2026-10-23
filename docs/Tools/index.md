@@ -10,8 +10,8 @@ Tools are callable operations the AI can invoke (function/tool calling) and util
 | --- | --- |
 | **Source Code** | `src/SmartHopper.Core.Grasshopper/AITools/` |
 | **Since Version** | ? |
-| **Last Updated** | 2026-06-14 |
-| **Documentation Maintainer** | Devin AI |
+| **Last Updated** | 2026-10-24 |
+| **Documentation Maintainer** | Codex |
 
 _Note: This documentation was written by AI on its own. It may contain some mistakes. If you would like to help, read this documentation and delete this comment if everything is okay._
 
@@ -31,6 +31,8 @@ SmartHopper's tool system extends Grasshopper components with AI-powered capabil
 ---
 
 ## End-User Guide
+
+See [Canvas and Conversation Tools](canvas-and-conversation-tools.md) for reviewed edits, compact queries, document tools, screenshots, plans, run budgets, and MCP knowledge resources.
 
 ### What Are Tools?
 
