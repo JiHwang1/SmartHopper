@@ -28,11 +28,11 @@ using Grasshopper.Kernel.Types;
 using Newtonsoft.Json.Linq;
 using SmartHopper.Components.Properties;
 using SmartHopper.Core.ComponentBase;
-using SmartHopper.Core.ComponentBase.Batch;
 using SmartHopper.Core.DataTree;
 using SmartHopper.Core.Grasshopper.Converters;
 using SmartHopper.Core.Grasshopper.Utils;
 using SmartHopper.Core.Grasshopper.Utils.Parsing;
+using SmartHopper.Core.Parsing;
 using SmartHopper.Infrastructure.AICall.Core.Base;
 using SmartHopper.Infrastructure.AICall.Core.Interactions;
 using SmartHopper.Infrastructure.AIProviders;
@@ -412,32 +412,16 @@ namespace SmartHopper.Components.Text
 
                     Debug.WriteLine($"[ProcessData] Tool result: {toolResult?.ToString() ?? "null"}");
 
-                    if (toolResult == null)
+                    var parsedResult = BooleanToolResultParser.Parse(toolResult?.Result);
+                    if (parsedResult.IsBatchSentinel)
                     {
-                        outputs["Result"].Add(new GH_String(string.Empty));
-                        outputs["UsedFallback"].Add(new GH_String(bool.TrueString));
+                        outputs["Result"].Add(new GH_String(parsedResult.Value));
+                        outputs["UsedFallback"].Add(new GH_String(parsedResult.Value));
                         continue;
                     }
 
-                    // In batch mode, CallAIToolAsync returns a sentinel placeholder under "result".
-                    // Forward it so ReconstructOutputTree can replace it after the batch completes.
-                    // The UsedFallback tree is unused in batch mode (OnBatchCompleted populates it
-                    // from the cached parse), but we keep it aligned for non-batch consistency.
-                    var resultValue = toolResult["result"]?.ToString();
-                    if (BatchSentinel.Is(resultValue))
-                    {
-                        outputs["Result"].Add(new GH_String(resultValue));
-                        outputs["UsedFallback"].Add(new GH_String(resultValue));
-                        continue;
-                    }
-
-                    // Non-batch: get the result and the authoritative usedFallback flag from the tool.
-                    outputs["Result"].Add(new GH_String(resultValue ?? string.Empty));
-
-                    // The tool sets "usedFallback" explicitly (true when fallback was applied or
-                    // when parsing failed without fallback). Default to true when missing.
-                    var usedFallback = toolResult["usedFallback"].GetBoolOrDefault(true);
-                    outputs["UsedFallback"].Add(new GH_String(usedFallback.ToString()));
+                    outputs["Result"].Add(new GH_String(parsedResult.Value));
+                    outputs["UsedFallback"].Add(new GH_String(parsedResult.UsedFallback.ToString()));
                 }
 
                 return outputs;
