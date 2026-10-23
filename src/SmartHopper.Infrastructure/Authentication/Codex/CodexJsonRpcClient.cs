@@ -23,6 +23,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using SmartHopper.Infrastructure.Utils;
 
 namespace SmartHopper.Infrastructure.Authentication.Codex
 {
@@ -31,7 +32,6 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
     /// </summary>
     public sealed class CodexJsonRpcClient : IAsyncDisposable
     {
-        private const string JsonRpcVersion = "2.0";
         private readonly TextReader reader;
         private readonly TextWriter writer;
         private readonly ConcurrentDictionary<long, TaskCompletionSource<JToken>> pending = new ();
@@ -87,7 +87,7 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
             {
                 var request = new JObject
                 {
-                    ["jsonrpc"] = JsonRpcVersion,
+                    ["jsonrpc"] = JsonRpcEnvelope.Version,
                     ["id"] = id,
                     ["method"] = method,
                 };
@@ -117,7 +117,7 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
             this.ThrowIfCompleted();
             var notification = new JObject
             {
-                ["jsonrpc"] = JsonRpcVersion,
+                ["jsonrpc"] = JsonRpcEnvelope.Version,
                 ["method"] = method,
             };
             if (parameters != null)
@@ -135,12 +135,7 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
         {
             return this.CompleteIncomingRequestAsync(
                 requestId,
-                new JObject
-                {
-                    ["jsonrpc"] = JsonRpcVersion,
-                    ["id"] = requestId.DeepClone(),
-                    ["result"] = result?.DeepClone() ?? JValue.CreateNull(),
-                },
+                JsonRpcEnvelope.Result(requestId, result),
                 cancellationToken);
         }
 
@@ -157,14 +152,19 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
 
             return this.CompleteIncomingRequestAsync(
                 requestId,
-                CreateErrorResponse(requestId, code, message),
+                JsonRpcEnvelope.Error(requestId, code, message),
                 cancellationToken);
         }
 
         /// <summary>
         /// Processes one JSONL message. Public for deterministic transport tests.
         /// </summary>
-        public async Task ProcessLineAsync(string line, CancellationToken cancellationToken = default)
+        public Task ProcessLineAsync(string line, CancellationToken cancellationToken = default)
+        {
+            return this.ProcessLineAsync(line, cancellationToken, waitForHandler: true);
+        }
+
+        private async Task ProcessLineAsync(string line, CancellationToken cancellationToken, bool waitForHandler)
         {
             JObject message;
             try
@@ -177,7 +177,9 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
                 return;
             }
 
-            if (message["jsonrpc"] != null && !string.Equals(message.Value<string>("jsonrpc"), JsonRpcVersion, StringComparison.Ordinal))
+            // Codex app-server also emits envelopes without jsonrpc; retain that wire compatibility.
+            if (message["jsonrpc"] != null && (message["jsonrpc"]!.Type != JTokenType.String ||
+                !string.Equals(message.Value<string>("jsonrpc"), JsonRpcEnvelope.Version, StringComparison.Ordinal)))
             {
                 this.MalformedMessageReceived?.Invoke(this, EventArgs.Empty);
                 return;
@@ -190,13 +192,19 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
             var hasError = message.TryGetValue("error", out var errorNode);
             if (requestIdNode != null && methodNode == null && (hasResult || hasError))
             {
-                if (hasResult == hasError)
+                if (hasResult == hasError || !IsValidRequestId(requestIdNode) ||
+                    (hasError && (errorNode is not JObject responseError ||
+                        responseError["code"]?.Type != JTokenType.Integer ||
+                        !int.TryParse(responseError["code"]!.ToString(Formatting.None), out _) ||
+                        responseError["message"]?.Type != JTokenType.String)))
                 {
                     this.MalformedMessageReceived?.Invoke(this, EventArgs.Empty);
                     return;
                 }
 
-                if (requestIdNode.Type == JTokenType.Integer && this.pending.TryGetValue(requestIdNode.Value<long>(), out var completion))
+                if (requestIdNode.Type == JTokenType.Integer &&
+                    long.TryParse(requestIdNode.ToString(Formatting.None), out var responseId) &&
+                    this.pending.TryGetValue(responseId, out var completion))
                 {
                     if (errorNode is JObject error)
                     {
@@ -208,6 +216,12 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
                     }
                 }
 
+                return;
+            }
+
+            if (hasResult || hasError)
+            {
+                this.MalformedMessageReceived?.Invoke(this, EventArgs.Empty);
                 return;
             }
 
@@ -231,7 +245,7 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
                 {
                     this.MalformedMessageReceived?.Invoke(this, EventArgs.Empty);
                     await this.WriteAsync(
-                        CreateErrorResponse(JValue.CreateNull(), -32600, "Invalid JSON-RPC request."),
+                        JsonRpcEnvelope.Error(null, -32600, "Invalid JSON-RPC request."),
                         cancellationToken).ConfigureAwait(false);
                     return;
                 }
@@ -240,16 +254,25 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
                 {
                     this.MalformedMessageReceived?.Invoke(this, EventArgs.Empty);
                     await this.WriteAsync(
-                        CreateErrorResponse(requestIdNode, -32602, "Invalid request parameters."),
+                        JsonRpcEnvelope.Error(requestIdNode, -32602, "Invalid request parameters."),
                         cancellationToken).ConfigureAwait(false);
                     return;
                 }
 
-                await this.ProcessServerRequestAsync(
+                var handling = this.ProcessServerRequestAsync(
                     requestIdNode,
                     method,
                     message["params"] as JObject ?? new JObject(),
-                    cancellationToken).ConfigureAwait(false);
+                    cancellationToken);
+                if (waitForHandler)
+                {
+                    await handling.ConfigureAwait(false);
+                }
+                else
+                {
+                    // A tool can wait for approval while other threads still need responses and notifications.
+                    _ = this.ObserveHandlerAsync(handling);
+                }
                 return;
             }
 
@@ -305,7 +328,7 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
                         break;
                     }
 
-                    await this.ProcessLineAsync(line, cancellationToken).ConfigureAwait(false);
+                    await this.ProcessLineAsync(line, cancellationToken, waitForHandler: false).ConfigureAwait(false);
                 }
 
                 this.Complete();
@@ -349,7 +372,7 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
             {
                 state.Dispose();
                 await this.WriteAsync(
-                    CreateErrorResponse(requestId, -32600, "Duplicate JSON-RPC request id."),
+                    JsonRpcEnvelope.Error(requestId, -32600, "Duplicate JSON-RPC request id."),
                     cancellationToken).ConfigureAwait(false);
                 return;
             }
@@ -448,18 +471,16 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
             }
         }
 
-        private static JObject CreateErrorResponse(JToken requestId, int code, string message)
+        private async Task ObserveHandlerAsync(Task handling)
         {
-            return new JObject
+            try
             {
-                ["jsonrpc"] = JsonRpcVersion,
-                ["id"] = requestId.DeepClone(),
-                ["error"] = new JObject
-                {
-                    ["code"] = code,
-                    ["message"] = message,
-                },
-            };
+                await handling.ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                this.Complete(new CodexTransportClosedException());
+            }
         }
 
         private static bool IsValidRequestId(JToken requestId)

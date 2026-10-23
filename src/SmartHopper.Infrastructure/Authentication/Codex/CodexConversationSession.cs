@@ -46,13 +46,16 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
         private readonly string systemPrompt;
         private readonly bool includeCurrentContext;
         private readonly ICodexDynamicToolBridge? dynamicToolBridge;
-        private readonly CodexServerRequestHandler? serverRequestHandler;
+        private readonly CodexServerRequestRouter? requestRouter;
+        private readonly SemaphoreSlim turnGate = new (1, 1);
         private readonly ConcurrentDictionary<string, byte> handledCallIds = new (StringComparer.Ordinal);
         private string model;
         private string reasoningEffort = string.Empty;
         private readonly object sync = new ();
         private readonly List<IAIInteraction> history = new ();
         private TaskCompletionSource<JObject>? turnCompleted;
+        private TaskCompletionSource<string>? turnStarted;
+        private readonly List<CodexNotificationEventArgs> pendingTurnNotifications = new ();
         private StringBuilder streamedText = new ();
         private string? threadId;
         private string? activeTurnId;
@@ -86,8 +89,7 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
             this.transport.NotificationReceived += this.OnNotificationReceived;
             if (this.dynamicToolBridge != null)
             {
-                this.serverRequestHandler = this.HandleServerRequestAsync;
-                this.transport.ServerRequestHandler = this.serverRequestHandler;
+                this.requestRouter = CodexServerRequestRouter.Acquire(this.transport);
             }
         }
 
@@ -272,27 +274,39 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
         {
             string? currentThread;
             string? currentTurn;
-            CancellationTokenSource? toolCancellation;
             lock (this.sync)
             {
                 currentThread = this.threadId;
                 currentTurn = this.activeTurnId;
-                toolCancellation = this.activeToolCancellation;
+                // Keep cancellation bound to this turn until the bridge has also been notified.
+                CancelTools(this.activeToolCancellation);
+                this.dynamicToolBridge?.CancelPending();
             }
-
-            toolCancellation?.Cancel();
-            this.dynamicToolBridge?.CancelPending();
 
             if (!string.IsNullOrWhiteSpace(currentThread) && !string.IsNullOrWhiteSpace(currentTurn))
             {
-                _ = this.transport.SendAsync(
+                _ = this.InterruptTurnAsync(
+                    currentThread,
+                    currentTurn);
+            }
+        }
+
+        private async Task InterruptTurnAsync(string currentThread, string currentTurn)
+        {
+            try
+            {
+                await this.transport.SendAsync(
                     "turn/interrupt",
                     new JObject
                     {
                         ["threadId"] = currentThread,
                         ["turnId"] = currentTurn,
                     },
-                    cancellationToken: CancellationToken.None);
+                    cancellationToken: CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // Cancellation must still complete locally when the transport has already closed.
             }
         }
 
@@ -304,18 +318,30 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
             }
 
             this.transport.NotificationReceived -= this.OnNotificationReceived;
-            if (this.serverRequestHandler != null && this.transport.ServerRequestHandler == this.serverRequestHandler)
+            lock (this.sync)
             {
-                this.transport.ServerRequestHandler = null;
+                this.requestRouter?.Release(this.threadId);
+                CancelTools(this.activeToolCancellation);
+                this.turnCompleted?.TrySetCanceled();
             }
 
-            this.activeToolCancellation?.Cancel();
-            this.activeToolCancellation?.Dispose();
             this.dynamicToolBridge?.Dispose();
-            this.turnCompleted?.TrySetCanceled();
         }
 
         private async Task<AIReturn> RunTurnAsync(CancellationToken cancellationToken)
+        {
+            await this.turnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                return await this.RunTurnCoreAsync(cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                this.turnGate.Release();
+            }
+        }
+
+        private async Task<AIReturn> RunTurnCoreAsync(CancellationToken cancellationToken)
         {
             this.ThrowIfDisposed();
             string? userMessage;
@@ -330,22 +356,31 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
                 return this.GetHistoryReturn();
             }
 
+            using var toolCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var completion = new TaskCompletionSource<JObject>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var started = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            lock (this.sync)
+            {
+                this.ThrowIfDisposed();
+                this.turnCompleted = completion;
+                this.turnStarted = started;
+                this.streamedText = new StringBuilder();
+                this.activeTurnId = null;
+                this.activeToolCancellation = toolCancellation;
+            }
+
+            using var cancellationRegistration = cancellationToken.Register(this.Cancel);
             try
             {
-                await this.EnsureThreadAsync(cancellationToken).ConfigureAwait(false);
+                this.observer.OnStart(this.Request);
+                await this.EnsureThreadAsync(toolCancellation.Token).ConfigureAwait(false);
                 var prompt = this.includeCurrentContext ? AddCurrentContext(userMessage) : userMessage;
                 string currentModel;
                 string currentReasoningEffort;
-                var completion = new TaskCompletionSource<JObject>(TaskCreationOptions.RunContinuationsAsynchronously);
-                var toolCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 lock (this.sync)
                 {
                     currentModel = this.model;
                     currentReasoningEffort = this.reasoningEffort;
-                    this.turnCompleted = completion;
-                    this.streamedText = new StringBuilder();
-                    this.activeTurnId = null;
-                    this.activeToolCancellation = toolCancellation;
                 }
 
                 var response = await this.transport.SendAsync(
@@ -366,12 +401,30 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
                     },
                     TimeSpan.FromSeconds(30),
                     cancellationToken).ConfigureAwait(false);
-                lock (this.sync)
+                var returnedTurnId = (response as JObject)?["turn"]?.Value<string>("id");
+                if (string.IsNullOrWhiteSpace(returnedTurnId))
                 {
-                    this.activeTurnId = (response as JObject)?["turn"]?.Value<string>("id");
+                    throw new InvalidOperationException("Codex did not return a turn ID.");
                 }
 
-                var completed = await completion.Task.WaitAsync(TimeSpan.FromMinutes(10), cancellationToken).ConfigureAwait(false);
+                lock (this.sync)
+                {
+                    this.activeTurnId = returnedTurnId;
+                    started.TrySetResult(returnedTurnId);
+                    foreach (var notification in this.pendingTurnNotifications)
+                    {
+                        this.ApplyTurnNotification(notification);
+                    }
+
+                    this.pendingTurnNotifications.Clear();
+                }
+
+                if (toolCancellation.IsCancellationRequested)
+                {
+                    this.Cancel();
+                }
+
+                var completed = await completion.Task.WaitAsync(TimeSpan.FromMinutes(10), toolCancellation.Token).ConfigureAwait(false);
                 var status = completed.Value<string>("status");
                 if (!string.Equals(status, "completed", StringComparison.Ordinal))
                 {
@@ -410,9 +463,13 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
                 {
                     this.turnCompleted = null;
                     this.activeTurnId = null;
-                    this.activeToolCancellation?.Dispose();
                     this.activeToolCancellation = null;
+                    this.turnStarted = null;
+                    this.pendingTurnNotifications.Clear();
                 }
+
+                // A completed/cancelled turn must not leave approval waits or tool calls live.
+                CancelTools(toolCancellation);
             }
         }
 
@@ -472,18 +529,49 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
                     cancellationToken).ConfigureAwait(false);
             }
 
-            this.threadId = (response as JObject)?["thread"]?.Value<string>("id");
-            if (string.IsNullOrWhiteSpace(this.threadId))
+            var returnedThreadId = (response as JObject)?["thread"]?.Value<string>("id");
+            if (string.IsNullOrWhiteSpace(returnedThreadId))
             {
                 throw new InvalidOperationException("Codex가 대화 thread ID를 반환하지 않았습니다.");
+            }
+
+            lock (this.sync)
+            {
+                this.ThrowIfDisposed();
+                this.requestRouter?.Register(returnedThreadId, this.HandleServerRequestAsync);
+                this.threadId = returnedThreadId;
             }
         }
 
         private void OnNotificationReceived(object? sender, CodexNotificationEventArgs notification)
         {
-            var notificationThreadId = notification.Parameters.Value<string>("threadId");
-            if (string.IsNullOrWhiteSpace(this.threadId) ||
-                !string.Equals(notificationThreadId, this.threadId, StringComparison.Ordinal))
+            lock (this.sync)
+            {
+                if (Volatile.Read(ref this.disposed) != 0 || this.turnCompleted == null ||
+                    (notification.Method != "item/agentMessage/delta" && notification.Method != "turn/completed") ||
+                    notification.Parameters["threadId"]?.Type != JTokenType.String ||
+                    !string.Equals(notification.Parameters.Value<string>("threadId"), this.threadId, StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                if (this.activeTurnId == null)
+                {
+                    this.pendingTurnNotifications.Add(notification);
+                    return;
+                }
+
+                this.ApplyTurnNotification(notification);
+            }
+        }
+
+        private void ApplyTurnNotification(CodexNotificationEventArgs notification)
+        {
+            var notificationTurnId = notification.Method == "turn/completed"
+                ? notification.Parameters["turn"]?["id"]
+                : notification.Parameters["turnId"];
+            if (notificationTurnId?.Type != JTokenType.String ||
+                !string.Equals(notificationTurnId.Value<string>(), this.activeTurnId, StringComparison.Ordinal))
             {
                 return;
             }
@@ -544,11 +632,35 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
             string? currentThread;
             string? currentTurn;
             CancellationToken toolCancellation;
+            Task<string>? started;
+            Task<JObject>? completion;
             lock (this.sync)
             {
                 currentThread = this.threadId;
                 currentTurn = this.activeTurnId;
                 toolCancellation = this.activeToolCancellation?.Token ?? CancellationToken.None;
+                started = this.turnStarted?.Task;
+                completion = this.turnCompleted?.Task;
+            }
+
+            if (currentTurn == null && started != null)
+            {
+                using var startCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, toolCancellation);
+                try
+                {
+                    currentTurn = await started.WaitAsync(startCancellation.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    await this.SendToolResultAsync(request.RequestId, CodexDynamicToolResult.Error("Canvas tool execution was cancelled."), CancellationToken.None).ConfigureAwait(false);
+                    return;
+                }
+            }
+
+            if (Volatile.Read(ref this.disposed) != 0 || toolCancellation.IsCancellationRequested || completion == null || completion.IsCompleted)
+            {
+                await this.SendToolResultAsync(request.RequestId, CodexDynamicToolResult.Error("Canvas tool execution was cancelled."), CancellationToken.None).ConfigureAwait(false);
+                return;
             }
 
             if (!string.Equals(call.ThreadId, currentThread, StringComparison.Ordinal))
@@ -602,6 +714,7 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
                 toolCancellation);
             try
             {
+                linkedCancellation.Token.ThrowIfCancellationRequested();
                 result = await this.dynamicToolBridge.ExecuteAsync(call, linkedCancellation.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
@@ -722,6 +835,18 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
             if (Volatile.Read(ref this.disposed) != 0)
             {
                 throw new ObjectDisposedException(nameof(CodexConversationSession));
+            }
+        }
+
+        private static void CancelTools(CancellationTokenSource? cancellation)
+        {
+            try
+            {
+                cancellation?.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                // The turn may finish after Cancel captured its source.
             }
         }
     }

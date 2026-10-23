@@ -143,6 +143,74 @@ namespace SmartHopper.Infrastructure.Tests.Mcp
             Assert.Null(raw);
         }
 
+        [Theory]
+        [InlineData("{\"jsonrpc\":\"2.0\",\"method\":\"unknown\"}")]
+        [InlineData("{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"params\":1}")]
+        [InlineData("{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":[]}")]
+        public async Task Dispatch_NotificationErrors_NeverProduceReplies(string request)
+        {
+            using var dispatcher = BuildDispatcher(new McpServerOptions());
+            Assert.Null(await dispatcher.DispatchAsync(request));
+        }
+
+        [Fact]
+        public async Task Dispatch_NotificationHandlerThrows_DoesNotReply()
+        {
+            var options = new McpServerOptions();
+            using var dispatcher = new JsonRpcDispatcher(options, new AIToolMcpAdapter(
+                options,
+                () => throw new System.InvalidOperationException("test failure"),
+                _ => Task.FromResult(new AIReturn())));
+            Assert.Null(await dispatcher.DispatchAsync("{\"jsonrpc\":\"2.0\",\"method\":\"tools/list\"}"));
+        }
+
+        [Theory]
+        [InlineData("null")]
+        [InlineData("1")]
+        [InlineData("[]")]
+        [InlineData("{\"method\":\"ping\",\"id\":1}")]
+        [InlineData("{\"jsonrpc\":[],\"method\":\"ping\",\"id\":1}")]
+        [InlineData("{\"jsonrpc\":\"1.0\",\"method\":\"ping\",\"id\":1}")]
+        [InlineData("{\"jsonrpc\":\"2.0\",\"method\":1,\"id\":1}")]
+        [InlineData("{\"jsonrpc\":\"2.0\",\"method\":{},\"id\":1}")]
+        [InlineData("{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"id\":true}")]
+        [InlineData("{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"id\":[]}")]
+        [InlineData("{\"jsonrpc\":\"2.0\",\"method\":\"ping\",\"id\":1,\"result\":{}}")]
+        public async Task Dispatch_InvalidEnvelope_ReturnsInvalidRequestWithNullId(string request)
+        {
+            using var dispatcher = BuildDispatcher(new McpServerOptions());
+            var response = JObject.Parse((await dispatcher.DispatchAsync(request))!);
+            Assert.Equal(-32600, response["error"]!.Value<int>("code"));
+            Assert.Equal(JTokenType.Null, response["id"]!.Type);
+            Assert.Null(response["result"]);
+        }
+
+        [Theory]
+        [InlineData("1")]
+        [InlineData("[]")]
+        [InlineData("null")]
+        public async Task Dispatch_UnsupportedParameters_ReturnsInvalidParams(string parameters)
+        {
+            using var dispatcher = BuildDispatcher(new McpServerOptions());
+            var response = JObject.Parse((await dispatcher.DispatchAsync(
+                $"{{\"jsonrpc\":\"2.0\",\"id\":\"typed-id\",\"method\":\"ping\",\"params\":{parameters}}}"))!);
+            Assert.Equal("typed-id", response.Value<string>("id"));
+            Assert.Equal(-32602, response["error"]!.Value<int>("code"));
+        }
+
+        [Theory]
+        [InlineData("null", "ping")]
+        [InlineData("\"request-id\"", "initialized")]
+        public async Task Dispatch_ExplicitId_IsARequestAndGetsAResponse(string id, string method)
+        {
+            using var dispatcher = BuildDispatcher(new McpServerOptions());
+            var response = JObject.Parse((await dispatcher.DispatchAsync(
+                $"{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"{method}\"}}"))!);
+            Assert.True(JToken.DeepEquals(JToken.Parse(id), response["id"]));
+            Assert.NotNull(response["result"]);
+            Assert.Null(response["error"]);
+        }
+
         [Fact]
         public async Task Dispatch_ToolsCall_MissingName_ReturnsToolError()
         {

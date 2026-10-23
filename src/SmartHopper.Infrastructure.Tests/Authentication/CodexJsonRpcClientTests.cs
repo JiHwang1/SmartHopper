@@ -20,6 +20,7 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using SmartHopper.Infrastructure.Authentication.Codex;
@@ -290,6 +291,79 @@ namespace SmartHopper.Infrastructure.Tests.Authentication
             await client.ProcessLineAsync("{\"jsonrpc\":\"2.0\",\"id\":999,\"result\":{\"late\":true}}");
 
             Assert.Empty(GetLines(output));
+        }
+
+        [Theory]
+        [InlineData("{\"jsonrpc\":[],\"id\":1,\"result\":{}}")]
+        [InlineData("{\"id\":1,\"error\":null}")]
+        [InlineData("{\"id\":1,\"error\":{\"code\":\"-32603\",\"message\":\"failure\"}}")]
+        [InlineData("{\"id\":1,\"error\":{\"code\":-32603}}")]
+        [InlineData("{\"id\":1,\"error\":{\"code\":9999999999999999999999999,\"message\":\"failure\"}}")]
+        [InlineData("{\"id\":1,\"result\":{},\"error\":{\"code\":-32603,\"message\":\"failure\"}}")]
+        [InlineData("{\"id\":1,\"method\":\"item/tool/call\",\"result\":{}}")]
+        public async Task InvalidResponseShape_DoesNotCompletePendingRequestOrInvokeHandler(string line)
+        {
+            using var output = new StringWriter();
+            await using var client = new CodexJsonRpcClient(new StringReader(string.Empty), output);
+            var malformed = 0;
+            var handlerCalled = false;
+            client.MalformedMessageReceived += (_, _) => malformed++;
+            client.ServerRequestHandler = (_, _) => { handlerCalled = true; return Task.CompletedTask; };
+            var pending = client.SendRequestAsync("pending", timeout: TimeSpan.FromSeconds(2));
+            await client.ProcessLineAsync(line);
+            Assert.Equal(1, malformed);
+            Assert.False(pending.IsCompleted);
+            Assert.False(handlerCalled);
+            await client.ProcessLineAsync("{\"id\":1,\"result\":{\"valid\":true}}");
+            Assert.True((await pending).Value<bool>("valid"));
+            Assert.Single(GetLines(output));
+        }
+
+        [Fact]
+        public async Task ReadLoop_PendingServerToolDoesNotBlockOtherRequestsOrNotifications()
+        {
+            using var output = new StringWriter();
+            var input = new LineReader();
+            await using var client = new CodexJsonRpcClient(input, output);
+            var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var notified = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var replied = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            client.NotificationReceived += (_, _) => notified.TrySetResult(true);
+            client.ServerRequestHandler = async (request, token) =>
+            {
+                entered.TrySetResult(true);
+                await release.Task.WaitAsync(token);
+                await client.SendResponseAsync(request.RequestId, new JObject(), token);
+                replied.TrySetResult(true);
+            };
+            client.Start();
+            var pending = client.SendRequestAsync("other-thread", timeout: TimeSpan.FromSeconds(2));
+            input.Add("{\"id\":\"tool\",\"method\":\"item/tool/call\",\"params\":{}}");
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            input.Add("{\"id\":1,\"result\":{\"ok\":true}}");
+            input.Add("{\"method\":\"turn/completed\",\"params\":{}}");
+            Assert.True((await pending).Value<bool>("ok"));
+            await notified.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.False(replied.Task.IsCompleted);
+            release.TrySetResult(true);
+            await replied.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            input.CloseInput();
+            Assert.Equal(2, GetLines(output).Length);
+        }
+
+        private sealed class LineReader : TextReader
+        {
+            private readonly Channel<string> lines = Channel.CreateUnbounded<string>();
+
+            public override async Task<string?> ReadLineAsync()
+            {
+                return await this.lines.Reader.WaitToReadAsync() ? await this.lines.Reader.ReadAsync() : null;
+            }
+
+            internal void Add(string line) => this.lines.Writer.TryWrite(line);
+
+            internal void CloseInput() => this.lines.Writer.TryComplete();
         }
 
         private static async Task WaitForLineCountAsync(StringWriter writer, int count)

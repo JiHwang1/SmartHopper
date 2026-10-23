@@ -28,6 +28,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using SmartHopper.Infrastructure.Utils;
 
 namespace SmartHopper.Infrastructure.Mcp
 {
@@ -40,7 +41,6 @@ namespace SmartHopper.Infrastructure.Mcp
     public sealed class JsonRpcDispatcher : IDisposable
     {
         private const string ProtocolVersion = "2025-03-26";
-        private const string JsonRpcVersion = "2.0";
 
         // JSON-RPC error codes per https://www.jsonrpc.org/specification.
         private const int ParseError = -32700;
@@ -70,23 +70,38 @@ namespace SmartHopper.Infrastructure.Mcp
         /// <param name="cancellationToken">Cancellation token.</param>
         public async Task<string?> DispatchAsync(string requestBody, CancellationToken cancellationToken = default)
         {
-            JObject? request;
+            JToken parsed;
             try
             {
-                request = JObject.Parse(requestBody ?? string.Empty);
+                parsed = JToken.Parse(requestBody ?? string.Empty);
             }
             catch (JsonReaderException ex)
             {
                 return SerializeError(null, ParseError, $"Parse error: {ex.Message}");
             }
 
-            var id = request["id"];
-            var method = request.Value<string?>("method");
-            var paramsToken = request["params"] as JObject;
-
-            if (string.IsNullOrWhiteSpace(method))
+            if (parsed is not JObject request ||
+                request["jsonrpc"]?.Type != JTokenType.String ||
+                request.Value<string>("jsonrpc") != JsonRpcEnvelope.Version ||
+                request["method"]?.Type != JTokenType.String ||
+                string.IsNullOrWhiteSpace(request.Value<string>("method")) ||
+                request.ContainsKey("result") || request.ContainsKey("error"))
             {
-                return SerializeError(id, InvalidRequest, "Missing 'method'");
+                return SerializeError(null, InvalidRequest, "Invalid JSON-RPC request.");
+            }
+
+            var id = request["id"];
+            if (id != null && id.Type != JTokenType.String && id.Type != JTokenType.Integer &&
+                id.Type != JTokenType.Float && id.Type != JTokenType.Null)
+            {
+                return SerializeError(null, InvalidRequest, "Invalid JSON-RPC request id.");
+            }
+
+            var method = request.Value<string>("method");
+            var paramsToken = request["params"] as JObject;
+            if (request.ContainsKey("params") && paramsToken == null)
+            {
+                return id == null ? null : SerializeError(id, InvalidParams, "Parameters must be a JSON object.");
             }
 
             await this.gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -100,8 +115,8 @@ namespace SmartHopper.Infrastructure.Mcp
                         break;
                     case "notifications/initialized":
                     case "initialized":
-                        // Notification — no response.
-                        return null;
+                        result = new JObject();
+                        break;
                     case "ping":
                         result = new JObject();
                         break;
@@ -112,7 +127,7 @@ namespace SmartHopper.Infrastructure.Mcp
                         result = await this.HandleToolsCallAsync(paramsToken).ConfigureAwait(false);
                         break;
                     default:
-                        return SerializeError(id, MethodNotFound, $"Method not found: {method}");
+                        return id == null ? null : SerializeError(id, MethodNotFound, $"Method not found: {method}");
                 }
 
                 if (id == null)
@@ -121,13 +136,7 @@ namespace SmartHopper.Infrastructure.Mcp
                     return null;
                 }
 
-                var response = new JObject
-                {
-                    ["jsonrpc"] = JsonRpcVersion,
-                    ["id"] = id,
-                    ["result"] = result,
-                };
-                return response.ToString(Formatting.None);
+                return JsonRpcEnvelope.Result(id, result).ToString(Formatting.None);
             }
             catch (OperationCanceledException)
             {
@@ -135,7 +144,7 @@ namespace SmartHopper.Infrastructure.Mcp
             }
             catch (Exception ex)
             {
-                return SerializeError(id, InternalError, $"Internal error: {ex.Message}");
+                return id == null ? null : SerializeError(id, InternalError, $"Internal error: {ex.Message}");
             }
             finally
             {
@@ -247,17 +256,7 @@ namespace SmartHopper.Infrastructure.Mcp
 
         private static string SerializeError(JToken? id, int code, string message)
         {
-            var response = new JObject
-            {
-                ["jsonrpc"] = JsonRpcVersion,
-                ["id"] = id ?? JValue.CreateNull(),
-                ["error"] = new JObject
-                {
-                    ["code"] = code,
-                    ["message"] = message ?? string.Empty,
-                },
-            };
-            return response.ToString(Formatting.None);
+            return JsonRpcEnvelope.Error(id, code, message).ToString(Formatting.None);
         }
 
         private static string GetAssemblyVersion()
