@@ -19,6 +19,7 @@
 namespace SmartHopper.Infrastructure.Tests.Mcp
 {
     using System.Collections.Generic;
+    using System.Threading;
     using System.Threading.Tasks;
     using Newtonsoft.Json.Linq;
     using SmartHopper.Infrastructure.AICall.Core.Interactions;
@@ -56,6 +57,8 @@ namespace SmartHopper.Infrastructure.Tests.Mcp
             Assert.Equal("9.9.9", (string?)obj["result"]?["serverInfo"]?["version"]);
             Assert.NotNull((string?)obj["result"]?["protocolVersion"]);
             Assert.NotNull(obj["result"]?["capabilities"]?["tools"]);
+            Assert.NotNull(obj["result"]?["capabilities"]?["resources"]);
+            Assert.NotNull(obj["result"]?["capabilities"]?["prompts"]);
         }
 
         [Fact]
@@ -115,10 +118,162 @@ namespace SmartHopper.Infrastructure.Tests.Mcp
             var dispatcher = BuildDispatcher(new McpServerOptions());
 
             var raw = await dispatcher.DispatchAsync(
-                "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"resources/list\"}");
+                "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"unknown/method\"}");
 
             var obj = JObject.Parse(raw!);
             Assert.Equal(-32601, (int?)obj["error"]?["code"]);
+        }
+
+        [Fact]
+        public async Task DefaultServerDispatcher_RegistersEmbeddedResourcesAndPrompts()
+        {
+            using var dispatcher = McpServer.BuildDefaultDispatcher(new McpServerOptions());
+
+            var resources = JObject.Parse((await dispatcher.DispatchAsync(
+                "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"resources/list\"}"))!);
+            var resourceList = (JArray)resources["result"]!["resources"]!;
+            Assert.NotEmpty(resourceList);
+            Assert.Contains(resourceList, resource => (string?)resource["uri"] == "docs:///grasshopper-foundations");
+            Assert.DoesNotContain(resourceList, resource => (string?)resource["uri"] == "docs:///assistant-core");
+
+            var resourceRead = JObject.Parse((await dispatcher.DispatchAsync(
+                "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"resources/read\",\"params\":{\"uri\":\"docs:///grasshopper-foundations\"}}"))!);
+            Assert.Equal("2.0", (string?)resourceRead["jsonrpc"]);
+            Assert.Equal("text/markdown", (string?)resourceRead["result"]?["contents"]?[0]?["mimeType"]);
+            Assert.False(string.IsNullOrWhiteSpace((string?)resourceRead["result"]?["contents"]?[0]?["text"]));
+
+            var prompts = JObject.Parse((await dispatcher.DispatchAsync(
+                "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"prompts/list\"}"))!);
+            Assert.Contains((JArray)prompts["result"]!["prompts"]!, prompt => (string?)prompt["name"] == "grasshopper-expert");
+
+            var prompt = JObject.Parse((await dispatcher.DispatchAsync(
+                "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"prompts/get\",\"params\":{\"name\":\"grasshopper-expert\"}}"))!);
+            var messages = (JArray)prompt["result"]!["messages"]!;
+            Assert.Single(messages);
+            Assert.Equal("user", (string?)messages[0]?["role"]);
+            Assert.False(string.IsNullOrWhiteSpace((string?)messages[0]?["content"]?["text"]));
+        }
+
+        [Fact]
+        public async Task Dispatch_ResourcesRead_MissingUri_ReturnsInvalidParams()
+        {
+            using var dispatcher = McpServer.BuildDefaultDispatcher(new McpServerOptions());
+
+            var response = JObject.Parse((await dispatcher.DispatchAsync(
+                "{\"jsonrpc\":\"2.0\",\"id\":\"missing-uri\",\"method\":\"resources/read\",\"params\":{}}"))!);
+
+            Assert.Equal("2.0", (string?)response["jsonrpc"]);
+            Assert.Equal("missing-uri", (string?)response["id"]);
+            Assert.Equal(-32602, (int?)response["error"]?["code"]);
+            Assert.Null(response["result"]);
+        }
+
+        [Theory]
+        [InlineData("docs:///does-not-exist")]
+        [InlineData("docs:///assistant-core")]
+        [InlineData("file:///C:/Windows/win.ini")]
+        [InlineData("docs:///../../secret.md")]
+        [InlineData("https://example.com/secret.md")]
+        [InlineData("docs:///grasshopper-foundations/extra")]
+        public async Task Dispatch_ResourcesRead_UnknownInternalAndArbitraryUris_ReturnsResourceNotFound(string resourceUri)
+        {
+            using var dispatcher = McpServer.BuildDefaultDispatcher(new McpServerOptions());
+
+            var request = new JObject
+            {
+                ["jsonrpc"] = "2.0",
+                ["id"] = 20,
+                ["method"] = "resources/read",
+                ["params"] = new JObject { ["uri"] = resourceUri },
+            };
+            var response = JObject.Parse((await dispatcher.DispatchAsync(request.ToString()))!);
+
+            Assert.Equal("2.0", (string?)response["jsonrpc"]);
+            Assert.Equal(20, (int?)response["id"]);
+            Assert.Equal(-32002, (int?)response["error"]?["code"]);
+            Assert.Null(response["result"]);
+        }
+
+        [Theory]
+        [InlineData("{}", -32602)]
+        [InlineData("{\"name\":\"does-not-exist\"}", -32602)]
+        public async Task Dispatch_PromptsGet_InvalidOrUnknownRequest_ReturnsInvalidParams(
+            string parameters,
+            int expectedCode)
+        {
+            using var dispatcher = McpServer.BuildDefaultDispatcher(new McpServerOptions());
+            var request = $"{{\"jsonrpc\":\"2.0\",\"id\":\"prompt-id\",\"method\":\"prompts/get\",\"params\":{parameters}}}";
+
+            var response = JObject.Parse((await dispatcher.DispatchAsync(request))!);
+
+            Assert.Equal("2.0", (string?)response["jsonrpc"]);
+            Assert.Equal("prompt-id", (string?)response["id"]);
+            Assert.Equal(expectedCode, (int?)response["error"]?["code"]);
+            Assert.Null(response["result"]);
+        }
+
+        [Theory]
+        [InlineData("resources/read", "{\"uri\":\"docs:///assistant-core\"}")]
+        [InlineData("prompts/get", "{\"name\":\"does-not-exist\"}")]
+        public async Task Dispatch_ResourceAndPromptFailuresForNotifications_DoNotReply(
+            string method,
+            string parameters)
+        {
+            using var dispatcher = McpServer.BuildDefaultDispatcher(new McpServerOptions());
+            var request = $"{{\"jsonrpc\":\"2.0\",\"method\":\"{method}\",\"params\":{parameters}}}";
+
+            Assert.Null(await dispatcher.DispatchAsync(request));
+        }
+
+        [Fact]
+        public async Task Dispatch_ToolsCall_EmitsOnlySafeImageBlocksWithoutBase64Text()
+        {
+            const string png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+            using var dispatcher = BuildDispatcher(
+                new McpServerOptions(),
+                executor: call =>
+                {
+                    var toolResult = new AIInteractionToolResult
+                    {
+                        Name = call.GetToolCall().Name,
+                        Result = new JObject { ["ok"] = true },
+                    };
+                    toolResult.Images.Add(new ToolResultImage { ImageData = png, MimeType = "image/png" });
+                    toolResult.Images.Add(new ToolResultImage { ImageData = "not-base64", MimeType = "image/png" });
+                    toolResult.Images.Add(new ToolResultImage { ImageData = png, MimeType = "text/html" });
+
+                    var response = new AIReturn
+                    {
+                        Request = call,
+                        SkipRequestValidation = true,
+                        SkipMetricsValidation = true,
+                    };
+                    response.SetBody(AIBody.Empty.WithAppended(toolResult));
+                    return Task.FromResult(response);
+                },
+                tools: ("gh_get", ReadOnlySchema, false));
+
+            var responseObject = JObject.Parse((await dispatcher.DispatchAsync(
+                "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"tools/call\",\"params\":{\"name\":\"gh_get\",\"arguments\":{}}}"))!);
+            var content = (JArray)responseObject["result"]!["content"]!;
+
+            Assert.Equal(2, content.Count);
+            Assert.Equal("text", (string?)content[0]?["type"]);
+            Assert.DoesNotContain(png, (string?)content[0]?["text"]);
+            Assert.DoesNotContain("imageBase64", (string?)content[0]?["text"]);
+            Assert.Equal("image", (string?)content[1]?["type"]);
+            Assert.Equal(png, (string?)content[1]?["data"]);
+            Assert.Equal("image/png", (string?)content[1]?["mimeType"]);
+        }
+
+        [Fact]
+        public void EmbeddedMcpResourceLoader_ReturnsCachedText()
+        {
+            var first = EmbeddedMcpResourceLoader.ReadMarkdown("grasshopper-foundations.md");
+            var second = EmbeddedMcpResourceLoader.ReadMarkdown("grasshopper-foundations.md");
+
+            Assert.False(string.IsNullOrWhiteSpace(first));
+            Assert.Same(first, second);
         }
 
         [Fact]
@@ -224,6 +379,52 @@ namespace SmartHopper.Infrastructure.Tests.Mcp
             Assert.Contains("name", (string?)obj["result"]?["content"]?[0]?["text"]);
         }
 
+        [Fact]
+        public async Task Dispatch_ToolsCall_PreservesToolErrorAndForwardsCancellationToken()
+        {
+            using var cancellation = new CancellationTokenSource();
+            CancellationToken observed = default;
+            using var dispatcher = BuildDispatcher(
+                new McpServerOptions(),
+                executor: call =>
+                {
+                    observed = call.CancellationToken;
+                    var response = new AIReturn
+                    {
+                        Request = call,
+                        SkipRequestValidation = true,
+                        SkipMetricsValidation = true,
+                    };
+                    response.CreateToolError("tool failed", call);
+                    return Task.FromResult(response);
+                },
+                tools: ("gh_get", ReadOnlySchema, false));
+
+            var responseObject = JObject.Parse((await dispatcher.DispatchAsync(
+                "{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"tools/call\",\"params\":{\"name\":\"gh_get\",\"arguments\":{}}}",
+                cancellation.Token))!);
+
+            Assert.Equal(cancellation.Token, observed);
+            Assert.Equal(true, (bool?)responseObject["result"]?["isError"]);
+            Assert.Null(responseObject["error"]);
+            Assert.Contains("tool failed", (string?)responseObject["result"]?["content"]?[0]?["text"]);
+        }
+
+        [Fact]
+        public void StaticProviders_ObserveCancellation()
+        {
+            using var cancellation = new CancellationTokenSource();
+            cancellation.Cancel();
+
+            var resourceProvider = new StaticMcpResourceProvider();
+            var promptProvider = new StaticMcpPromptProvider();
+
+            Assert.ThrowsAny<System.OperationCanceledException>(() =>
+                resourceProvider.ListResourcesAsync(cancellation.Token).GetAwaiter().GetResult());
+            Assert.ThrowsAny<System.OperationCanceledException>(() =>
+                promptProvider.ListPromptsAsync(cancellation.Token).GetAwaiter().GetResult());
+        }
+
         private static JsonRpcDispatcher BuildDispatcher(
             McpServerOptions options,
             params (string name, string schema, bool mutatesCanvas)[] tools)
@@ -250,6 +451,18 @@ namespace SmartHopper.Infrastructure.Tests.Mcp
 
             var adapter = new AIToolMcpAdapter(options, () => catalog, executor);
             return new JsonRpcDispatcher(options, adapter);
+        }
+
+        private static JsonRpcDispatcher BuildDispatcher(
+            McpServerOptions options,
+            IMcpResourceProvider resourceProvider,
+            IMcpPromptProvider promptProvider)
+        {
+            var adapter = new AIToolMcpAdapter(
+                options,
+                () => new Dictionary<string, AITool>(),
+                _ => Task.FromResult(new AIReturn()));
+            return new JsonRpcDispatcher(options, adapter, resourceProvider, promptProvider);
         }
     }
 }

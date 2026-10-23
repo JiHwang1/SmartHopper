@@ -54,8 +54,18 @@ namespace SmartHopper.Infrastructure.Mcp
         /// Initializes a new instance of the <see cref="McpServer"/> class.
         /// </summary>
         public McpServer(McpServerOptions options)
-            : this(options, new JsonRpcDispatcher(options, new AIToolMcpAdapter(options)))
+            : this(options, BuildDefaultDispatcher(options))
         {
+        }
+
+        internal static JsonRpcDispatcher BuildDefaultDispatcher(McpServerOptions options)
+        {
+            var adapter = new AIToolMcpAdapter(options);
+            return new JsonRpcDispatcher(
+                options,
+                adapter,
+                new StaticMcpResourceProvider(),
+                new StaticMcpPromptProvider());
         }
 
         /// <summary>

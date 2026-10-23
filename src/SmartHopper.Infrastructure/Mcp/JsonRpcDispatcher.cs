@@ -48,18 +48,33 @@ namespace SmartHopper.Infrastructure.Mcp
         private const int MethodNotFound = -32601;
         private const int InvalidParams = -32602;
         private const int InternalError = -32603;
+        private const int ResourceNotFound = -32002;
 
         private readonly McpServerOptions options;
         private readonly AIToolMcpAdapter adapter;
+        private readonly IMcpResourceProvider? resourceProvider;
+        private readonly IMcpPromptProvider? promptProvider;
         private readonly SemaphoreSlim gate = new SemaphoreSlim(1, 1);
 
         /// <summary>
         /// Initializes a new instance of the <see cref="JsonRpcDispatcher"/> class.
         /// </summary>
         public JsonRpcDispatcher(McpServerOptions options, AIToolMcpAdapter adapter)
+            : this(options, adapter, null, null)
+        {
+        }
+
+        /// <summary>Initializes a dispatcher with optional static resource and prompt providers.</summary>
+        public JsonRpcDispatcher(
+            McpServerOptions options,
+            AIToolMcpAdapter adapter,
+            IMcpResourceProvider? resourceProvider,
+            IMcpPromptProvider? promptProvider)
         {
             this.options = options ?? throw new ArgumentNullException(nameof(options));
             this.adapter = adapter ?? throw new ArgumentNullException(nameof(adapter));
+            this.resourceProvider = resourceProvider;
+            this.promptProvider = promptProvider;
         }
 
         /// <summary>
@@ -124,7 +139,19 @@ namespace SmartHopper.Infrastructure.Mcp
                         result = this.HandleToolsList();
                         break;
                     case "tools/call":
-                        result = await this.HandleToolsCallAsync(paramsToken).ConfigureAwait(false);
+                        result = await this.HandleToolsCallAsync(paramsToken, cancellationToken).ConfigureAwait(false);
+                        break;
+                    case "resources/list":
+                        result = await this.HandleResourcesListAsync(cancellationToken).ConfigureAwait(false);
+                        break;
+                    case "resources/read":
+                        result = await this.HandleResourcesReadAsync(paramsToken, cancellationToken).ConfigureAwait(false);
+                        break;
+                    case "prompts/list":
+                        result = await this.HandlePromptsListAsync(cancellationToken).ConfigureAwait(false);
+                        break;
+                    case "prompts/get":
+                        result = await this.HandlePromptsGetAsync(paramsToken, cancellationToken).ConfigureAwait(false);
                         break;
                     default:
                         return id == null ? null : SerializeError(id, MethodNotFound, $"Method not found: {method}");
@@ -141,6 +168,10 @@ namespace SmartHopper.Infrastructure.Mcp
             catch (OperationCanceledException)
             {
                 throw;
+            }
+            catch (McpProtocolException ex)
+            {
+                return id == null ? null : SerializeError(id, ex.Code, ex.Message);
             }
             catch (Exception ex)
             {
@@ -166,6 +197,8 @@ namespace SmartHopper.Infrastructure.Mcp
                 ["capabilities"] = new JObject
                 {
                     ["tools"] = new JObject { ["listChanged"] = false },
+                    ["resources"] = new JObject { ["listChanged"] = false },
+                    ["prompts"] = new JObject { ["listChanged"] = false },
                 },
                 ["serverInfo"] = new JObject
                 {
@@ -187,7 +220,7 @@ namespace SmartHopper.Infrastructure.Mcp
             return new JObject { ["tools"] = list };
         }
 
-        private async Task<JToken> HandleToolsCallAsync(JObject? paramsToken)
+        private async Task<JToken> HandleToolsCallAsync(JObject? paramsToken, CancellationToken cancellationToken)
         {
             if (paramsToken == null)
             {
@@ -215,8 +248,123 @@ namespace SmartHopper.Infrastructure.Mcp
                 return BuildToolError("'arguments' must be a JSON object");
             }
 
-            var result = await this.adapter.ExecuteAsync(toolName!, arguments).ConfigureAwait(false);
+            var result = await this.adapter.ExecuteAsync(toolName!, arguments, cancellationToken).ConfigureAwait(false);
             return BuildToolCallEnvelope(result);
+        }
+
+        private async Task<JToken> HandleResourcesListAsync(CancellationToken cancellationToken)
+        {
+            var list = new JArray();
+            if (this.resourceProvider != null)
+            {
+                var resources = await this.resourceProvider.ListResourcesAsync(cancellationToken).ConfigureAwait(false);
+                foreach (var resource in resources)
+                {
+                    list.Add(new JObject
+                    {
+                        ["uri"] = resource.Uri.ToString(),
+                        ["name"] = resource.Name,
+                        ["mimeType"] = resource.MimeType,
+                        ["description"] = resource.Description ?? string.Empty,
+                    });
+                }
+            }
+
+            return new JObject { ["resources"] = list };
+        }
+
+        private async Task<JToken> HandleResourcesReadAsync(JObject? paramsToken, CancellationToken cancellationToken)
+        {
+            var uriString = paramsToken?["uri"]?.Value<string>();
+            if (string.IsNullOrWhiteSpace(uriString) || !Uri.TryCreate(uriString, UriKind.Absolute, out var uri))
+            {
+                throw new McpProtocolException(InvalidParams, "Missing or invalid 'uri'");
+            }
+
+            if (this.resourceProvider == null)
+            {
+                throw new McpProtocolException(ResourceNotFound, $"Resource not found: {uri}");
+            }
+
+            var resource = await this.resourceProvider.GetResourceAsync(uri, cancellationToken).ConfigureAwait(false);
+            if (resource == null)
+            {
+                throw new McpProtocolException(ResourceNotFound, $"Resource not found: {uri}");
+            }
+
+            var text = await resource.GetTextAsync(cancellationToken).ConfigureAwait(false);
+            return new JObject
+            {
+                ["contents"] = new JArray
+                {
+                    new JObject
+                    {
+                        ["uri"] = resource.Uri.ToString(),
+                        ["mimeType"] = resource.MimeType,
+                        ["text"] = text ?? string.Empty,
+                    },
+                },
+            };
+        }
+
+        private async Task<JToken> HandlePromptsListAsync(CancellationToken cancellationToken)
+        {
+            var list = new JArray();
+            if (this.promptProvider != null)
+            {
+                var prompts = await this.promptProvider.ListPromptsAsync(cancellationToken).ConfigureAwait(false);
+                foreach (var prompt in prompts)
+                {
+                    list.Add(new JObject
+                    {
+                        ["name"] = prompt.Name,
+                        ["description"] = prompt.Description,
+                    });
+                }
+            }
+
+            return new JObject { ["prompts"] = list };
+        }
+
+        private async Task<JToken> HandlePromptsGetAsync(JObject? paramsToken, CancellationToken cancellationToken)
+        {
+            var name = paramsToken?["name"]?.Value<string>();
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                throw new McpProtocolException(InvalidParams, "Missing 'name'");
+            }
+
+            if (this.promptProvider == null
+                || !Uri.TryCreate($"prompts:///{Uri.EscapeDataString(name)}", UriKind.Absolute, out var uri))
+            {
+                throw new McpProtocolException(InvalidParams, $"Prompt not found: {name}");
+            }
+
+            var prompt = await this.promptProvider.GetPromptAsync(uri, cancellationToken).ConfigureAwait(false);
+            if (prompt == null)
+            {
+                throw new McpProtocolException(InvalidParams, $"Prompt not found: {name}");
+            }
+
+            var messages = new JArray();
+            foreach (var message in await prompt.GetMessagesAsync(cancellationToken).ConfigureAwait(false))
+            {
+                messages.Add(new JObject
+                {
+                    ["role"] = message.Role,
+                    ["content"] = new JObject
+                    {
+                        ["type"] = message.ContentType,
+                        ["text"] = message.Text,
+                    },
+                });
+            }
+
+            return new JObject
+            {
+                ["description"] = prompt.Description,
+                ["messages"] = messages,
+            };
         }
 
         private static JObject BuildToolCallEnvelope(McpToolCallResult result)
@@ -229,6 +377,16 @@ namespace SmartHopper.Infrastructure.Mcp
                     ["text"] = result.Payload.ToString(Formatting.None),
                 },
             };
+
+            foreach (var image in result.Images)
+            {
+                content.Add(new JObject
+                {
+                    ["type"] = "image",
+                    ["data"] = image.ImageData,
+                    ["mimeType"] = image.MimeType,
+                });
+            }
 
             return new JObject
             {
@@ -269,6 +427,17 @@ namespace SmartHopper.Infrastructure.Mcp
             }
 
             return asm.GetName().Version?.ToString() ?? "0.0.0";
+        }
+
+        private sealed class McpProtocolException : Exception
+        {
+            public McpProtocolException(int code, string message)
+                : base(message)
+            {
+                this.Code = code;
+            }
+
+            public int Code { get; }
         }
     }
 }
