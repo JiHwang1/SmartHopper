@@ -139,32 +139,13 @@ try {
         exit 1
     }
     
-    # Get the public key as hex string using sn -tp
-    $output = & $snExe -tp $tempPubKey 2>&1
-    
-    # Parse the public key hex from the output
-    # The output contains lines like "Public key (hash algorithm: sha1):" followed by hex
-    $publicKeyHex = ""
-    $capture = $false
-    foreach ($line in $output) {
-        if ($line -match "^Public key") {
-            $capture = $true
-            continue
-        }
-        if ($capture) {
-            # Stop at empty line or "Public key token" line
-            if ($line -match "^Public key token" -or [string]::IsNullOrWhiteSpace($line)) {
-                break
-            }
-            # Accumulate hex digits (remove spaces)
-            $publicKeyHex += ($line -replace '\s', '')
-        }
-    }
+    # sn.exe output is localized. Its exported file already contains the exact
+    # strong-name public key blob; encode the bytes without parsing console text.
+    $publicKeyBytes = [System.IO.File]::ReadAllBytes($tempPubKey)
+    $publicKeyHex = [BitConverter]::ToString($publicKeyBytes).Replace('-', '').ToLowerInvariant()
     
     if ([string]::IsNullOrEmpty($publicKeyHex)) {
-        Write-Error "Failed to parse public key from sn.exe output"
-        Write-Host "sn.exe output was:"
-        $output | ForEach-Object { Write-Host $_ }
+        Write-Error "sn.exe exported an empty public key"
         exit 1
     }
     

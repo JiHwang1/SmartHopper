@@ -110,8 +110,8 @@ function Test-CodeExamples {
     
     # Check if Developer Reference section exists
     if ($content -match "## Developer Reference") {
-        # Count code blocks
-        $codeBlocks = [regex]::Matches($content, '```csharp').Count
+        # Count opening fences for any named language, including PowerShell and JSON.
+        $codeBlocks = [regex]::Matches($content, '(?m)^```[\t ]*[A-Za-z][^\r\n]*$').Count
         
         if ($codeBlocks -lt 2) {
             $issues += "Developer Reference should have at least 2 code examples (found: $codeBlocks)"
