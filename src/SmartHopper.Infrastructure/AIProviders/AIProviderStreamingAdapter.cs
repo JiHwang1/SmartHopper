@@ -26,6 +26,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using SmartHopper.Infrastructure.AICall.Core.Requests;
+using SmartHopper.Infrastructure.Utils;
 
 namespace SmartHopper.Infrastructure.AIProviders
 {
@@ -74,12 +75,11 @@ namespace SmartHopper.Infrastructure.AIProviders
         }
 
         /// <summary>
-        /// Creates a new HttpClient instance with common defaults.
+        /// Creates a disposable, request-scoped HttpClient backed by shared connections.
         /// </summary>
         protected HttpClient CreateHttpClient()
         {
-            var client = new HttpClient();
-            return client;
+            return ProviderHttpClient.Create();
         }
 
         /// <summary>

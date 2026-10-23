@@ -635,7 +635,7 @@ namespace SmartHopper.Infrastructure.AIProviders
         /// <returns>A new HttpClient with appropriate timeout configured.</returns>
         protected HttpClient CreateBatchHttpClient(int? requestTimeoutSeconds = null)
         {
-            var client = new HttpClient();
+            var client = ProviderHttpClient.Create();
 
             // Use provided timeout or shared default.
             // Actual timeout resolution from settings is handled by RequestTimeoutPolicy upstream.
@@ -798,7 +798,7 @@ namespace SmartHopper.Infrastructure.AIProviders
 
             Debug.WriteLine($"[{this.Name}] Call - Method: {httpMethod.ToUpper(CultureInfo.InvariantCulture)}, URL: {fullUri}");
 
-            using (var httpClient = new HttpClient())
+            using (var httpClient = ProviderHttpClient.Create())
             {
                 // Apply timeout from request (should be resolved by RequestTimeoutPolicy).
                 // If somehow still null, fall back to the shared default so all layers stay aligned.
@@ -864,31 +864,21 @@ namespace SmartHopper.Infrastructure.AIProviders
 
                 try
                 {
-                    HttpResponseMessage response;
-                    switch (httpMethod.ToUpper(CultureInfo.InvariantCulture))
+                    var method = httpMethod.ToUpper(CultureInfo.InvariantCulture);
+                    using var httpRequest = new HttpRequestMessage(method switch
                     {
-                        case "GET":
-                            response = await httpClient.GetAsync(fullUri, cancellationToken).ConfigureAwait(false);
-                            break;
-                        case "POST":
-                            var postContent = !string.IsNullOrEmpty(requestBody)
-                                ? new StringContent(requestBody, Encoding.UTF8, contentType)
-                                : null;
-                            response = await httpClient.PostAsync(fullUri, postContent, cancellationToken).ConfigureAwait(false);
-                            break;
-                        case "DELETE":
-                            response = await httpClient.DeleteAsync(fullUri, cancellationToken).ConfigureAwait(false);
-                            break;
-                        case "PATCH":
-                            var patchContent = !string.IsNullOrEmpty(requestBody)
-                                ? new StringContent(requestBody, Encoding.UTF8, contentType)
-                                : null;
-                            response = await httpClient.PatchAsync(fullUri, patchContent, cancellationToken).ConfigureAwait(false);
-                            break;
-                        default:
-                            throw new NotSupportedException($"HTTP method '{httpMethod}' is not supported. Supported methods: GET, POST, DELETE, PATCH");
+                        "GET" => HttpMethod.Get,
+                        "POST" => HttpMethod.Post,
+                        "DELETE" => HttpMethod.Delete,
+                        "PATCH" => HttpMethod.Patch,
+                        _ => throw new NotSupportedException($"HTTP method '{httpMethod}' is not supported. Supported methods: GET, POST, DELETE, PATCH"),
+                    }, fullUri);
+                    if ((method == "POST" || method == "PATCH") && !string.IsNullOrEmpty(requestBody))
+                    {
+                        httpRequest.Content = new StringContent(requestBody, Encoding.UTF8, contentType);
                     }
 
+                    using var response = await httpClient.SendAsync(httpRequest, cancellationToken).ConfigureAwait(false);
                     var content = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
                     Debug.WriteLine($"[{this.Name}] Call - Response status: {response.StatusCode}");
 
