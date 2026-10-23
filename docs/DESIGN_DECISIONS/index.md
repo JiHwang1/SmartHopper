@@ -10,8 +10,8 @@ This section documents the key architectural decisions behind SmartHopper, expla
 | --- | --- |
 | **Source Code** | `N/A` |
 | **Since Version** | ? |
-| **Last Updated** | 2026-06-14 |
-| **Documentation Maintainer** | Devin AI |
+| **Last Updated** | 2026-10-22 |
+| **Documentation Maintainer** | Codex |
 
 _Note: This documentation was written by AI on its own. It may contain some mistakes. If you would like to help, read this documentation and delete this comment if everything is okay._
 
@@ -143,23 +143,23 @@ if ((model.Capabilities & required) == required)
 
 ---
 
-### 2. Immutable Records for AI Request/Response Data
+### 2. Body Container Snapshots with Shared Interactions
 
 **Context**: The AI call pipeline passes data through multiple stages (policies, encoding, provider, decoding). Mutable objects caused subtle bugs when policies modified shared state.
 
-**Decision**: Use immutable records (`AIBody`, `AIReturn`, `AIMetrics`) with builder patterns (`AIBodyBuilder`) for construction.
+**Decision**: Use `AIBody` records and `AIBodyBuilder` to snapshot interaction containers and newness indices. The builder exposes a read-only interaction collection, but its interaction objects remain shared and mutable. `AIReturn`, metrics, and legacy newness markers are mutable; this is not a deep immutable request/response model.
 
 **Rationale**:
 
-- Thread safety: immutable data can be shared across async operations safely
-- Predictability: policies cannot accidentally corrupt data for downstream stages
-- Debuggability: each pipeline stage produces a new, inspectable snapshot
+- Collection isolation: adding to a builder cannot change an already-built body's interaction collection.
+- Compatibility: providers and streaming code retain their existing mutable interaction contracts.
+- Debuggability: policies can construct a new body container while retaining interaction identity.
 
 **Trade-offs**:
 
-- More allocations (new record per stage)
-- Builder pattern adds ceremony for construction
-- Requires discipline: all mutation goes through builders
+- Container copies allocate arrays and newness lists.
+- Consumers must coordinate shared interaction mutations; body records alone do not establish thread safety.
+- A deep immutable model would require a separate compatibility migration. Empty bodies use independent newness lists to avoid cross-request marker leakage.
 
 **Related**: [AIBody & AIBodyBuilder](../Providers/AICall/body-metrics-status.md)
 

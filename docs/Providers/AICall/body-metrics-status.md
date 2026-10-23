@@ -8,10 +8,10 @@ Covers `AIBody`, `AIMetrics`, `AICallStatus`, and `AIReturn`.
 
 | Property | Value |
 | --- | --- |
-| **Source Code** | `src/SmartHopper.Infrastructure/AICall/Core/BodyMetricsStatus.cs` |
+| **Source Code** | `src/SmartHopper.Infrastructure/AICall/Core/Interactions/AIBody.cs` |
 | **Since Version** | ? |
-| **Last Updated** | 2026-06-14 |
-| **Documentation Maintainer** | Devin AI |
+| **Last Updated** | 2026-10-22 |
+| **Documentation Maintainer** | Codex |
 
 _Note: This documentation was written by AI on its own. It may contain some mistakes. If you would like to help, read this documentation and delete this comment if everything is okay._
 
@@ -35,7 +35,7 @@ This page documents the core data types that carry conversation state, performan
 ### AIBody
 
 - File: `AIBody.cs`
-- **Immutable record** — once constructed, cannot be modified directly
+- **Container snapshot** — builder changes cannot alter the interaction collection of an already-built body. Interaction objects and legacy newness markers remain mutable and require coordination between consumers. Empty bodies have independent newness lists.
 - Holds interactions and optional controls:
   - `ToolFilter` (default `-*` = disable all)
   - `ContextFilter` (default `-*` = disable)

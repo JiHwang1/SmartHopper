@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Recheck Canvas document, selection, and permissions after approval; retain document and cancellation checks across queued mutations and script replacement.
+- Verify Canvas tool postconditions for moves, locks, previews, connections, and groups; distinguish observed changes from fully verified requested states.
+- Enforce JSON Schema constraints for AI responses and tool arguments, including nested required fields, types, enum values, and numeric limits.
+- Propagate tool timeouts and caller cancellation to the executing operation without duplicating validation on the normal execution path.
+- Extract strong-name public keys from exported bytes so local builds work with localized Windows SDK tools.
+
+### Changed
+
+- Reuse provider HTTP connection pools while preserving client-specific authentication, headers, and timeouts.
+- Share provider schema wrapping and boolean component result parsing; preserve existing component identifiers and outputs.
+- Consolidate Panel alignment compatibility normalization at the GhJSON handler boundary and restore the validating library writer.
+- Preserve legacy movement and validation APIs while clarifying snapshot mutability and isolating empty-body newness markers.
+- Start the Canvas status label in read-only mode; route Codex server tool calls by conversation thread, unregister closed sessions, and share Dynamic Tool descriptors and execution/cancellation ownership.
+- Verify Canvas mutations from captured target state; offload only detached graph layout calculation, keeping native refinements and mutations on Rhino's UI thread.
+- Coalesce pending WebChat renders by DOM key while preserving lossless tool and final renders; filter non-surfaceable diagnostics and flush the final render before returning to Ready.
+- Group batch lifecycle state in `BatchRunState`, centralize terminal failure handling, and retain the protected `OnBatchCompleted` hook and saved-file contracts.
+- Reuse read-only tool-registry snapshots and parsed external tool schemas; share JSON-RPC 2.0 envelope construction across MCP and Codex transports.
+
 ### Added
 
 - **Codex Account**: Codex app-server에 OAuth를 위임하는 독립 계정 탭을 추가해 Codex CLI 탐색, ChatGPT 로그인·취소·상태 새로고침·로그아웃을 지원합니다. SmartHopper는 OAuth 토큰을 직접 읽거나 저장하지 않습니다.

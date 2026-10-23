@@ -175,6 +175,10 @@ Validates provider response content against the request's JSON schema.
   4. Reports schema violations with path hints
 - **Emits**: `ReturnInvalid` code on schema violations
 
+### Schema compilation and provider wrappers
+
+`JsonSchemaService` compiles valid definitions once and retains a bounded FIFO cache of up to 128 schemas, with a 16 KiB per-definition retention limit. Larger valid schemas still run through validation but are not cached; invalid definitions are not cached. External schema fetches are disabled. Provider adapters are selected through `JsonSchemaAdapterRegistry`; wrapper metadata travels with the request so response validation can unwrap provider-required object roots. A provider receives a clone of the cached object schema, so adapter transformations do not mutate the cached definition.
+
 ### Usage Patterns
 
 #### In Request Policies

@@ -133,20 +133,14 @@ public class EnvironmentContextProvider : IAIContextProvider
 
 ```text
 GH_Component
-├── AsyncComponentBase              -- async lifecycle
-│   └── StatefulComponentBase       -- + state machine, persistence
-│       ├── AIProviderComponentBase -- + provider selection
-│       │   └── AIStatefulAsyncComponentBase (8 partial files)
-│       │       ├── AISelectingStatefulAsyncComponentBase
-│       │       └── AIOutputAdapterBase
-│       └── SelectingStatefulComponentBase
-├── ProviderComponentBase           -- non-async provider
-├── SelectingComponentBase          -- non-async Select button
-└── AIInputAdapterBase              -- sync input adapters
+└── AsyncComponentBase              -- async lifecycle
+    └── StatefulComponentBase       -- + state machine, persistence
+        └── AIProviderComponentBase -- + provider selection
+            └── AIStatefulAsyncComponentBase -- + AI execution and batch lifecycle
 
 ```
 
-See [ComponentBase](./Components/ComponentBase/index.md) for full documentation.
+`ProviderComponentBase` is a separate synchronous provider branch. Selection behavior is shared through `SelectingSupport`; provider selection is shared through `ProviderSelectionCore`. Selection-bearing components compose these helpers without changing the inheritance chain. See [ComponentBase](./Components/ComponentBase/index.md) for the class map and details.
 
 ### Context Providers
 
@@ -227,7 +221,8 @@ SmartHopper integrates with external AI providers through a secure plug-in model
 Key architectural choices are documented in [Design Decisions](./DESIGN_DECISIONS/index.md):
 
 - Composable Input/Output adapters over monolithic components
-- Immutable records for AI request/response data
+- Body container snapshots with shared mutable interactions
+- Component feature sharing through `SelectingSupport` and `ProviderSelectionCore` composition
 - Policy pipeline for cross-cutting concerns
 - Capability flags for model selection
 - Secure provider plugin loading

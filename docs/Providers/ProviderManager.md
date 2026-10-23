@@ -123,6 +123,8 @@ var descriptors = settings.GetSettingDescriptors();
 
 ```
 
+Setting descriptors provide the metadata used to validate and present provider settings. `ProviderManager` also consults `IsSecret` when logging setting updates, so secret values are redacted while non-secret values remain diagnosable.
+
 #### Updating Provider Settings
 
 ```csharp

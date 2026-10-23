@@ -89,6 +89,8 @@ This is the root documentation hub for SmartHopper. It organizes all guides, ref
 
 ### Development
 
+- [Improvement Plan](Development/improvement-plan.md) -- implementation scope and verification record
+- [Canvas Improvement Validation](Development/canvas-improvement-validation.md) -- manual Rhino acceptance checks
 - [Authenticode Signing](Development/authenticode-signing.md) -- assembly signing for provider trust
 - [Patch Propagation](Development/patch-propagation.md) -- multi-branch commit fan-out
 

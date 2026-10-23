@@ -127,6 +127,9 @@ When the component processes multiple branches, emit one metric entry per branch
 - `IsBatchRequest()` — true when `Settings.BatchTier == true` **and** the provider implements `IAIBatchProvider`. Surfaces a one-shot remark when batch is requested but unsupported.
 - `TrySubmitBatchAsync<T>(outputName, resultDict, ct)` — convenience: stores the sentinel tree and submits the queue.
 - `_sentinelTrees`, `_batchSentinelIds`, `_batchQueue`, `_batchSubmission` — explicit lifecycle, see XML docs in `Main.cs`. Persisted by `Write/Read` so polling resumes after file save/load and *Load results from file* can rebuild trees.
+- `BatchRunState` owns batch-run scratch state and the sentinel/metrics lifecycle. `ResetForNextRun` preserves an active submission and restored sentinel trees; `ClearSentinels` is used when starting a genuinely new batch, and `ConsumeCompletionTime` stamps batch duration once. Existing saved keys and formats remain unchanged.
+- Timeout and provider terminal failures share one failure-finalization path. Successful results still dispatch through the protected virtual `OnBatchCompleted` hook before output reconstruction.
+- The inert `BeforeSolveInstance` and `OnSolveInstancePostSolve` overrides were removed; metrics and batch output behavior remain in their active lifecycle paths.
 - Cancellation: `OnTasksCancelDetected` immediately surfaces *"Cancelling batch ..."*, calls `IAIBatchProvider.CancelBatchAsync`, then updates the message with success/failure.
 - Context menu: *Load results from file* (multi-select) and *Check batch status* (enabled only while a batch is active).
 

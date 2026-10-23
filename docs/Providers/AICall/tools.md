@@ -59,6 +59,7 @@ This page documents how tool calls are represented, executed, and orchestrated w
   - Validates tool availability against `Body.ToolFilter`.
 - Execution:
   - Delegates to the Tool Manager to run the tool and collect a JSON result plus runtime messages.
+  - `AIToolCall.Exec()` validates before execution and uses the internal validated manager path; public `AIToolManager.ExecuteTool(...)` callers retain manager-level validation.
   - Produces an `AIReturn` whose `Body` contains the corresponding `AIInteractionToolResult`.
 
 #### Example: executing a single tool call

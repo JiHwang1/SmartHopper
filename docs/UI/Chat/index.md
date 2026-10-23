@@ -183,8 +183,9 @@ All UI work (including `ExecuteScript`) is marshaled via `RhinoApp.InvokeOnUiThr
 
 ### Performance pipeline (high level)
 
-- The host minimizes WebView re-entrancy by enqueueing DOM operations (`RunWhenWebViewReady(...)`) and draining them in small batches.
-- The drain scheduling is debounced to coalesce bursts of updates into fewer WebView script injections.
+- The host serializes renders through `ChatRenderScheduler`. A pending render with the same DOM key is replaced before Markdown rendering, coalescing superseded streaming updates; this keyed queue is scheduling state, not a content cache. Reset and disposal cancel pending work.
+- The scheduler has 64 active-plus-queued render slots. Intermediate streaming snapshots may be skipped when full; tool messages and final renders wait losslessly for a slot, and those admission waiters are not included in the slot bound. `OnFinal` queues the stable final message, then `FinishRenderingAsync` flushes rendering before returning the UI to Ready.
+- A separate 100-key FIFO idempotency store suppresses repeated host HTML delivery. It is not the scheduler. The browser also has its own bounded LRU HTML cache for sampled equality checks.
 - `ExecuteScript(...)` enforces a small concurrency gate to avoid piling scripts into the WebView.
 
 On the WebView side (`chat-script.js`):
@@ -192,12 +193,20 @@ On the WebView side (`chat-script.js`):
 - Message mutations (`addMessage`, `upsertMessage`, `upsertMessageAfter`, `replaceLastMessageByRole`) are enqueued and flushed using `requestAnimationFrame` (with a small timeout fallback).
 - Rendering work is reduced using:
   - Template cloning for repeated HTML.
-  - A keyed LRU cache + sampled diff checks to skip redundant DOM updates.
+  - A bounded LRU cache of rendered HTML plus sampled equality checks to skip redundant DOM updates. This browser cache is distinct from the host's keyed coalescing queue and FIFO idempotency store.
   - Optional patch payloads (JSON `{ patch, html }`) to append/replace only message content during streaming instead of re-sending full bubbles.
   - A max message HTML length cap to prevent huge DOM inserts.
 - Lightweight perf counters are sampled to keep overhead low; only outlier renders are logged.
 
 These changes also mitigate issue #261 ("ui eventually freezes on opening webchat").
+
+`HtmlChatRenderer` omits runtime diagnostics that are not surfaceable or whose severity is below `Info`.
+
+### Manual acceptance checks
+
+- Fill the 64 active-plus-queued render slots with streaming updates that reuse a DOM key. Confirm a pending same-key update is replaced before Markdown rendering and that the most recent stable final render reaches the WebView before the Ready status.
+- Stop a turn and induce a provider error while streaming under queue pressure. Confirm the latest partial text is delivered before the Cancelled or Error status and no late delta overwrites the finished turn.
+- Reset or close the dialog with renders queued. Confirm pending work is cancelled and no stale render reaches the replaced or disposed WebView.
 
 ---
 

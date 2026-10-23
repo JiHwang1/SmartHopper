@@ -86,6 +86,10 @@ A tool is considered enabled when its `AITool.Enabled` flag is `true` (the defau
 
 ### Tool Mapping
 
+`AIToolExternalCatalog` builds protocol-neutral descriptors from the shared tool registry and applies the exposure policy before MCP or Codex projects them into their protocol-specific schema. Parsed tool schemas are cached against the current tool instance and schema text; descriptors receive cloned schemas.
+
+MCP and the Codex app-server client use the shared `JsonRpcEnvelope` helper for JSON-RPC 2.0 result and error shapes. Request parsing and transport dispatch remain specific to each protocol.
+
 `JsonRpcDispatcher` exposes the following MCP methods:
 
 | MCP method | SmartHopper behavior |

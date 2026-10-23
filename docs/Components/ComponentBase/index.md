@@ -57,20 +57,16 @@ When you use a SmartHopper component in Grasshopper, its behavior -- async execu
 
 ```text
 GH_Component
-├── AsyncComponentBase                  -- async lifecycle (workers, tasks, cancellation)
-│   └── StatefulComponentBase           -- + state machine, persistence, debounce, run/toggle
-│       ├── AIProviderComponentBase     -- + AI provider selection menu and persistence
-│       │   └── AIStatefulAsyncComponentBase  (partial, 8 files)
-│       │       ├── AISelectingStatefulAsyncComponentBase  -- + canvas Select button
-│       │       └── AIOutputAdapterBase -- AIInputPayload → AIReturn → typed outputs
-│       └── SelectingStatefulComponentBase  -- + canvas Select button (no AI)
-├── ProviderComponentBase               -- non-async AI provider component
-├── SelectingComponentBase              -- non-async, non-stateful Select button base
-└── AIInputAdapterBase                  -- non-AI sync component producing AIInputPayload
+└── AsyncComponentBase                  -- async lifecycle (workers, tasks, cancellation)
+    └── StatefulComponentBase           -- + state machine, persistence, debounce, run/toggle
+        └── AIProviderComponentBase     -- + AI provider selection
+            └── AIStatefulAsyncComponentBase -- + AI call and batch lifecycle
+                ├── AISelectingStatefulAsyncComponentBase -- composes SelectingSupport
+                └── AIOutputAdapterBase -- AIInputPayload → AIReturn → typed outputs
 
 ```
 
-`AsyncWorkerBase` is the worker abstraction used by every async component to run compute off the UI thread.
+`ProviderComponentBase` is a separate `GH_Component` branch. It and `AIProviderComponentBase` compose `ProviderSelectionCore` for provider selection. `SelectingComponentBase`, `SelectingStatefulComponentBase`, and `AISelectingStatefulAsyncComponentBase` compose `SelectingSupport`; selection is not a base class in the provider inheritance chain. `AIInputAdapterBase` is a separate synchronous input-adapter branch. `AsyncWorkerBase` is the worker abstraction used by async components to run compute off the UI thread.
 
 ### Class Documentation
 
@@ -192,7 +188,7 @@ public class MyStatefulComponent : StatefulComponentBase
 ### Design Criteria
 
 1. **Single-responsibility layers.** Each base adds exactly one orthogonal concern (async, state, provider, selection, adapter shape).
-2. **Inherit upward, never sideways.** Shared logic lives in `Core` helpers (`SelectingComponentCore`, `ProviderSelectionCore`), not duplicated between bases.
+2. **Keep shared component behavior composable.** `SelectingSupport` and `ProviderSelectionCore` hold behavior used by distinct inheritance branches.
 3. **UI calls go through Rhino's UI thread.** Workers must never touch GH/Rhino UI directly; use `Rhino.RhinoApp.InvokeOnUiThread`.
 4. **Outputs are persisted, not recomputed.** `StatefulComponentBase` writes outputs through `GHPersistenceService` so saved files restore without re-running.
 5. **Single finalization point.** AI components emit outputs and metrics atomically through `FinishResults<T>`; both batch and non-batch paths converge there.
