@@ -33,6 +33,7 @@ namespace SmartHopper.Components
             Instances.ComponentServer.AddCategoryIcon("SmartHopper", Resources.smarthopper);
             Instances.ComponentServer.AddCategoryShortName("SmartHopper", "SH");
             Instances.ComponentServer.AddCategorySymbolName("SmartHopper", 'S');
+            SmartHopper.Core.UI.Chat.ChatDocumentTracking.TrackerFactory = () => new ChatDocumentTracker();
 
             // Register the canvas centering callback for DialogCanvasLink
             DialogCanvasLink.CenterCanvasOnComponentCallback = (guid, horizontalPos) => CanvasAccess.CenterViewOnComponent(guid, horizontalPos);

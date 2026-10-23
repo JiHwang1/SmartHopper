@@ -54,6 +54,57 @@ namespace SmartHopper.Core.Grasshopper.Utils.Canvas
             return doc;
         }
 
+        /// <summary>Captures the active document on the UI thread before starting an asynchronous tool.</summary>
+        public static Task<GH_Document> GetCurrentCanvasAsync(CancellationToken cancellationToken)
+        {
+            var completion = new TaskCompletionSource<GH_Document>(TaskCreationOptions.RunContinuationsAsynchronously);
+            void Capture()
+            {
+                try
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    completion.TrySetResult(GetCurrentCanvas());
+                }
+                catch (Exception ex)
+                {
+                    completion.TrySetException(ex);
+                }
+            }
+
+            if (RhinoApp.InvokeRequired) RhinoApp.InvokeOnUiThread((Action)Capture);
+            else Capture();
+            return completion.Task;
+        }
+
+        /// <summary>Queues a read or document operation on the Rhino UI thread.</summary>
+        internal static Task<T> RunOnUiThreadAsync<T>(Func<T> action, CancellationToken cancellationToken = default)
+        {
+            if (action == null) throw new ArgumentNullException(nameof(action));
+            var completion = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+            void Run()
+            {
+                try
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    completion.TrySetResult(action());
+                }
+                catch (Exception ex)
+                {
+                    completion.TrySetException(ex);
+                }
+            }
+
+            if (RhinoApp.InvokeRequired) RhinoApp.InvokeOnUiThread((Action)Run);
+            else Run();
+            return completion.Task;
+        }
+
+        /// <summary>Runs a short document operation on the Rhino UI thread and waits for it.</summary>
+        internal static T RunOnUiThread<T>(Func<T> action, CancellationToken cancellationToken = default)
+        {
+            return RunOnUiThreadAsync(action, cancellationToken).GetAwaiter().GetResult();
+        }
+
         /// <summary>
         /// Gets the list of active objects in the current document.
         /// </summary>
@@ -168,7 +219,7 @@ namespace SmartHopper.Core.Grasshopper.Utils.Canvas
                         if (!objects.TryGetValue(kvp.Key, out var obj)) continue;
                         var start = obj.Attributes.Pivot;
                         var target = relative ? new PointF(start.X + kvp.Value.X, start.Y + kvp.Value.Y) : kvp.Value;
-                        if (start == target) continue;
+                        if (Math.Abs(start.X - target.X) < 0.5f && Math.Abs(start.Y - target.Y) < 0.5f) continue;
                         moves.Add((obj, target));
                         moved.Add(kvp.Key);
                     }
@@ -254,7 +305,18 @@ namespace SmartHopper.Core.Grasshopper.Utils.Canvas
         /// <returns>The file path where the document was saved, or null.</returns>
         public static string SaveDocument(string filePath = null)
         {
-            var doc = GetCurrentCanvas();
+            return SaveDocument(GetCurrentCanvas(), filePath);
+        }
+
+        /// <summary>
+        /// Saves a specific open Grasshopper document, including one that is not currently active.
+        /// </summary>
+        /// <param name="document">The document to save.</param>
+        /// <param name="filePath">Optional destination path. Defaults to the document's existing path.</param>
+        /// <returns>The saved path, or null when the document was closed or saving failed.</returns>
+        public static string SaveDocument(GH_Document document, string filePath = null)
+        {
+            var doc = document;
             if (doc == null)
             {
                 return null;
@@ -273,14 +335,17 @@ namespace SmartHopper.Core.Grasshopper.Utils.Canvas
 
             try
             {
-                var writer = new GH_DocumentIO(doc);
-                if (writer.SaveQuiet(targetPath))
+                return RunOnUiThread(() =>
                 {
-                    return targetPath;
-                }
+                    if (!Instances.DocumentServer.Any(item => ReferenceEquals(item, doc)))
+                    {
+                        return null;
+                    }
 
-                Debug.WriteLine("[CanvasAccess] SaveDocument returned false.");
-                return null;
+                    var writer = new GH_DocumentIO(doc);
+                    return writer.SaveQuiet(targetPath) ? targetPath : null;
+                });
+
             }
             catch (Exception ex)
             {

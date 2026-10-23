@@ -120,11 +120,10 @@ namespace SmartHopper.Core.Grasshopper.AITools
                     {
                         "Call gh_get_selected when the user refers to 'selected', 'this', or 'these'.",
                         "Call gh_get_errors to locate broken definitions.",
-                        "Call *_with_data tools (e.g. gh_get_start_with_data, gh_get_end_with_data) when computed values are needed.",
-                        "Call gh_get_start to find data sources (parameters, sliders, first components in the flow, etc.) without runtime data.",
-                        "Call gh_get_end to find output sinks (panels, previews, last component in the flow, etc.) without runtime data.",
+                        "Call gh_get with typeFilter ['+startnodes'] to find data sources, and ['+endnodes'] to find output sinks, without runtime data.",
+                        "Add includeRuntimeData: true (or includeInternalizedData: true) when computed or persistent values are needed.",
                         "Call gh_get_by_guid when GUIDs are already known.",
-                        "Use gh_get (generic) as a fallback only when no specialized gh_get_* variant fits.",
+                        "Use gh_get with attrFilters, typeFilter, categoryFilter, or detail: 'summary' for other scoped queries.",
                     }),
                 (
                     "edit_script",

@@ -27,9 +27,9 @@ using GhJSON.Core.SchemaModels;
 using GhJSON.Grasshopper;
 using GhJSON.Grasshopper.LayoutRefinements;
 using GhJSON.Grasshopper.Serialization;
+using GhJSON.Grasshopper.Shared;
 using Grasshopper;
 using Newtonsoft.Json.Linq;
-using Rhino;
 using SmartHopper.Core.Grasshopper.Utils.Canvas;
 using SmartHopper.Infrastructure.AICall.Core.Interactions;
 using SmartHopper.Infrastructure.AICall.Core.Returns;
@@ -140,7 +140,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
                     ? new PointF(startToken["x"]?.ToObject<float>() ?? 0f, startToken["y"]?.ToObject<float>() ?? 0f)
                     : default;
                 var viewportOnly = args["viewportOnly"]?.ToObject<bool>() ?? false;
-                var canvasDocument = await OnUiThreadAsync(CanvasAccess.GetCurrentCanvas, token).ConfigureAwait(false);
+                var canvasDocument = await CanvasAccess.GetCurrentCanvasAsync(token).ConfigureAwait(false);
                 var snapshot = await CanvasAccess.InvokeInDocumentAsync(canvasDocument, token, () =>
                 {
                     // Native selection, bounds, and serialization are confined to the UI thread.
@@ -164,32 +164,32 @@ namespace SmartHopper.Core.Grasshopper.AITools
 
                     var serialized = GhJsonGrasshopper.Serialize(selected, SerializationOptions.Default);
                     var pivots = selected.ToDictionary(item => item.InstanceGuid, item => item.Attributes.Pivot);
-                    return Task.FromResult((Document: serialized, Layout: CopyLayoutGraph(serialized), Pivots: pivots));
+                    var centers = selected.ToDictionary(item => item.InstanceGuid, PivotSemantics.BoundsCenter);
+                    var measure = CanvasNodeMetricsProvider.Create(canvasDocument);
+                    var metrics = selected.ToDictionary(item => item.InstanceGuid, item => measure(item.InstanceGuid));
+                    return Task.FromResult((Layout: CopyLayoutGraph(serialized), Pivots: pivots, Centers: centers, Metrics: metrics));
                 }).ConfigureAwait(false);
 
-                // Only the detached graph of IDs, integer pivots, and connection endpoints enters Task.Run.
-                // GhJSON.Core 1.1.1 CalculateLayout has no Rhino/Grasshopper assembly dependencies.
-                var layout = await CalculateLayoutAsync(snapshot.Layout, token).ConfigureAwait(false);
+                // Capture all native geometry above; the shared pipeline receives detached metrics only.
+                var positions = await Task.Run(() => GhJsonGrasshopper.ComputeLayout(snapshot.Layout, new CanvasLayoutOptions
+                {
+                    Layout = new LayoutOptions { SpacingX = 200f, SpacingY = 100f, IslandSpacingY = 150f },
+                    NodeSizeProvider = id => snapshot.Metrics.TryGetValue(id, out var value) ? value?.Size : null,
+                    Refinements = new LayoutRefinementOptions
+                    {
+                        SpacingX = 200f,
+                        SpacingY = 100f,
+                        NodeMetricsProvider = id => snapshot.Metrics.TryGetValue(id, out var value) ? value : null,
+                    },
+                }), token).ConfigureAwait(false);
                 token.ThrowIfCancellationRequested();
                 var placement = await CanvasAccess.InvokeInDocumentAsync(canvasDocument, token, async () =>
                 {
-                    if (snapshot.Pivots.Keys.Any(id => canvasDocument.FindObject(id, false) == null))
+                    if (snapshot.Pivots.Any(item => canvasDocument.FindObject(item.Key, false)?.Attributes?.Pivot != item.Value))
                     {
-                        throw new InvalidOperationException("A layout target was removed while layout was being calculated.");
+                        throw new InvalidOperationException("A layout target changed while layout was being calculated. Retry the layout.");
                     }
 
-                    // Refinements resolve native bounds and ports: they must remain on the UI thread.
-                    var positions = LayoutRefinementEngine.ApplyRefinements(layout, snapshot.Document,
-                        new LayoutRefinementOptions
-                        {
-                            SpacingX = 200f,
-                            SpacingY = 100f,
-                            ApplyBoundsAwareSpacing = true,
-                            AlignParamsToInputPorts = true,
-                            AlignOneToOneConnections = true,
-                            MinimizeConnectionLengths = true,
-                            AvoidCollisions = true,
-                        });
                     if (positions.Count == 0)
                     {
                         throw new InvalidOperationException("Layout produced no positions for the selected components.");
@@ -198,12 +198,13 @@ namespace SmartHopper.Core.Grasshopper.AITools
                     if (!hasStart)
                     {
                         var first = positions.OrderBy(item => item.Value.X).ThenBy(item => item.Value.Y).First();
-                        var pivot = snapshot.Pivots[first.Key];
-                        origin = new PointF(pivot.X - first.Value.X, pivot.Y - first.Value.Y);
+                        var center = snapshot.Centers[first.Key];
+                        origin = new PointF(center.X - first.Value.X, center.Y - first.Value.Y);
                     }
 
                     var targets = positions.ToDictionary(item => item.Key,
-                        item => new PointF(origin.X + item.Value.X, origin.Y + item.Value.Y));
+                        item => PivotSemantics.CenterToPivot(canvasDocument.FindObject(item.Key, false),
+                            new PointF(origin.X + item.Value.X, origin.Y + item.Value.Y)));
                     var moved = await CanvasAccess.MoveInstancesAsync(targets, false, true, token, canvasDocument).ConfigureAwait(true);
                     return (Moved: moved, Targets: targets);
                 }).ConfigureAwait(false);
@@ -214,6 +215,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
                     ["targets"] = new JObject(placement.Targets.Select(item => new JProperty(item.Key.ToString("D"),
                         new JObject { ["x"] = item.Value.X, ["y"] = item.Value.Y }))),
                 };
+                result.WithEnvelope(ToolResultEnvelope.Create(toolInfo.Name ?? this.toolName, ToolResultContentType.Object, toolCallId: toolInfo.Id));
                 var body = AIBodyBuilder.Create()
                     .AddToolResult(result, id: toolInfo.Id, name: toolInfo.Name ?? this.toolName)
                     .Build();
@@ -230,8 +232,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
         private static GhJsonDocument CopyLayoutGraph(GhJsonDocument document)
         {
             // Do not pass serialized extension dictionaries or parameter data to the worker.
-            // goinmul: Core 1.1.1 reads component Id/InstanceGuid/Pivot and endpoint Id/ParamIndex only.
-            // Recheck this field set before upgrading GhJSON.Core.
+            // The layout pipeline reads stable IDs, pivots, endpoints, and the detached node metrics.
             return new GhJsonDocument(document.Schema, null,
                 document.Components.Select(component => new GhJsonComponent
                 {
@@ -246,35 +247,5 @@ namespace SmartHopper.Core.Grasshopper.AITools
                 }), null);
         }
 
-        private static Task<LayoutResult> CalculateLayoutAsync(GhJsonDocument graph, CancellationToken cancellationToken)
-        {
-            return Task.Run(() => GhJSON.Core.GhJson.CalculateLayout(graph, new LayoutOptions
-            {
-                SpacingX = 200f,
-                SpacingY = 100f,
-                IslandSpacingY = 150f,
-            }), cancellationToken);
-        }
-
-        private static Task<T> OnUiThreadAsync<T>(Func<T> action, CancellationToken cancellationToken)
-        {
-            var completion = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
-            void Run()
-            {
-                try
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    completion.TrySetResult(action());
-                }
-                catch (Exception ex)
-                {
-                    completion.TrySetException(ex);
-                }
-            }
-
-            if (RhinoApp.InvokeRequired) RhinoApp.InvokeOnUiThread((Action)Run);
-            else Run();
-            return completion.Task;
-        }
     }
 }

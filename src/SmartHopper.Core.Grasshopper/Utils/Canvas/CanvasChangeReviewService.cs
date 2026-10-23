@@ -1,0 +1,521 @@
+/*
+ * SmartHopper - AI-powered Grasshopper Plugin
+ * Copyright (C) 2024-2026 Marc Roca Musach
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 3 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this library; if not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
+ */
+
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using GhJSON.Core.SchemaModels;
+using GhJSON.Grasshopper;
+using GhJSON.Grasshopper.Deserialization;
+using Grasshopper.Kernel;
+using Newtonsoft.Json.Linq;
+using SmartHopper.Infrastructure.Consent;
+
+namespace SmartHopper.Core.Grasshopper.Utils.Canvas
+{
+    /// <summary>
+    /// Describes a proposed connection or disconnection between two live canvas objects.
+    /// </summary>
+    public sealed class CanvasConnectionReviewProposal
+    {
+        /// <summary>Gets or sets the source object instance GUID.</summary>
+        public Guid SourceGuid { get; set; }
+
+        /// <summary>Gets or sets the target object instance GUID.</summary>
+        public Guid TargetGuid { get; set; }
+
+        /// <summary>Gets or sets the optional source parameter name.</summary>
+        public string? SourceParameter { get; set; }
+
+        /// <summary>Gets or sets the optional target parameter name.</summary>
+        public string? TargetParameter { get; set; }
+    }
+
+    /// <summary>
+    /// Creates and displays reusable review sessions for AI-proposed structural canvas changes.
+    /// </summary>
+    public static class CanvasChangeReviewService
+    {
+        private static readonly SemaphoreSlim ReviewGate = new SemaphoreSlim(1, 1);
+        /// <summary>
+        /// Displays a review dialog on the Rhino UI thread.
+        /// </summary>
+        /// <param name="session">Session to review.</param>
+        /// <returns><c>true</c> when the user chooses to apply selected changes.</returns>
+        public static async Task<bool> ReviewAsync(
+            CanvasChangeReviewSession session,
+            MutationInvocationContext? context = null,
+            CancellationToken cancellationToken = default)
+        {
+            await ReviewGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+            ConsentGate.RegisterPresenter(CanvasChangeConsentPresenter.Instance);
+            var decision = await MutatingOperationExecutor.ReviewAsync(
+                new CanvasMutationConsentProposal(session),
+                context,
+                cancellationToken).ConfigureAwait(false);
+            if (!decision.IsApproved)
+            {
+                session.SetAllAccepted(false);
+                return false;
+            }
+
+            var accepted = decision.AcceptedItemKeys.ToHashSet(StringComparer.Ordinal);
+            foreach (var item in session.Items)
+            {
+                session.SetAccepted(item.Key, accepted.Contains(item.Key));
+            }
+
+            return true;
+            }
+            finally { ReviewGate.Release(); }
+        }
+
+        /// <summary>
+        /// Shows the underlying graphical review dialog on Rhino's UI thread.
+        /// </summary>
+        internal static async Task<bool> ShowReviewDialogAsync(
+            CanvasChangeReviewSession session,
+            CancellationToken cancellationToken)
+        {
+            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var registration = cancellationToken.Register(() => completion.TrySetCanceled(cancellationToken));
+            global::Rhino.RhinoApp.InvokeOnUiThread(() =>
+            {
+                try
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (session.DocumentId.HasValue && global::Grasshopper.Instances.ActiveCanvas?.Document?.DocumentID != session.DocumentId.Value)
+                        throw new InvalidOperationException("The reviewed document is no longer active.");
+                    PopulateProposedBounds(session);
+                    CanvasChangeReviewDialog.ShowReviewAsync(session, cancellationToken).ContinueWith(
+                        task =>
+                        {
+                            if (task.IsCanceled)
+                            {
+                                completion.TrySetCanceled(cancellationToken);
+                            }
+                            else if (task.IsFaulted)
+                            {
+                                completion.TrySetException(
+                                    (Exception?)task.Exception ??
+                                    new InvalidOperationException("The canvas change review dialog failed."));
+                            }
+                            else
+                            {
+                                completion.TrySetResult(task.Result);
+                            }
+                        },
+                        CancellationToken.None,
+                        TaskContinuationOptions.ExecuteSynchronously,
+                        TaskScheduler.Default);
+                }
+                catch (Exception ex)
+                {
+                    completion.TrySetException(ex);
+                }
+            });
+            return await completion.Task.ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Creates a review session for removing live canvas objects.
+        /// </summary>
+        /// <param name="source">Tool that produced the proposal.</param>
+        /// <param name="instanceGuids">Objects proposed for removal.</param>
+        /// <returns>A session containing objects currently present on the canvas.</returns>
+        public static CanvasChangeReviewSession CreateRemovalSession(string source, IEnumerable<Guid> instanceGuids)
+        {
+            var document = GhJsonGrasshopper.GetByGuids(instanceGuids);
+            var items = document.Components
+                .Where(component => component.InstanceGuid.HasValue)
+                .Select(component => new CanvasChangeReviewItem(
+                    $"remove:{component.InstanceGuid}",
+                    CanvasChangeKind.ComponentRemoved,
+                    component.NickName ?? component.Name ?? "Component",
+                    component.Library ?? "Existing canvas object")
+                {
+                    ComponentId = component.Id,
+                    ExistingInstanceGuid = component.InstanceGuid,
+                })
+                .ToList();
+            if (document.Groups != null)
+            {
+                items.AddRange(document.Groups
+                    .Select((group, index) => new CanvasChangeReviewItem(
+                        $"remove:{group.InstanceGuid}",
+                        CanvasChangeKind.GroupRemoved,
+                        group.Name ?? "Group",
+                        $"{group.Members.Count} member(s)")
+                    {
+                        ExistingInstanceGuid = group.InstanceGuid,
+                        GroupIndex = index,
+                    }));
+            }
+            return new CanvasChangeReviewSession(
+                "Review AI canvas removals",
+                source,
+                document,
+                items) { DocumentId = global::Grasshopper.Instances.ActiveCanvas?.Document?.DocumentID };
+        }
+
+        /// <summary>
+        /// Creates a review session for proposed component moves.
+        /// </summary>
+        /// <param name="source">Tool that produced the proposal.</param>
+        /// <param name="targets">Target positions or offsets by instance GUID.</param>
+        /// <param name="relative">Whether targets are relative offsets.</param>
+        /// <returns>A session containing proposed component pivots.</returns>
+        public static CanvasChangeReviewSession CreateMoveSession(
+            string source,
+            IReadOnlyDictionary<Guid, PointF> targets,
+            bool relative)
+        {
+            var document = GhJsonGrasshopper.GetByGuids(targets.Keys);
+            var proposedComponents = document.Components.Select(component =>
+            {
+                if (!component.InstanceGuid.HasValue ||
+                    !targets.TryGetValue(component.InstanceGuid.Value, out var target))
+                {
+                    return component;
+                }
+
+                var current = component.Pivot ?? new GhJsonPivot();
+                return CopyWithPivot(component, new GhJsonPivot(
+                    relative ? current.X + (int)Math.Round(target.X) : (int)Math.Round(target.X),
+                    relative ? current.Y + (int)Math.Round(target.Y) : (int)Math.Round(target.Y)));
+            }).ToList();
+            var proposedDocument = new GhJsonDocument(
+                document.Schema,
+                document.Metadata,
+                proposedComponents,
+                document.Connections,
+                document.Groups);
+            var items = proposedComponents
+                .Where(component => component.InstanceGuid.HasValue && targets.ContainsKey(component.InstanceGuid.Value))
+                .Select(component => new CanvasChangeReviewItem(
+                    $"move:{component.InstanceGuid}",
+                    CanvasChangeKind.ComponentModified,
+                    component.NickName ?? component.Name ?? "Component",
+                    component.Pivot == null ? "Move component" : $"Move to {component.Pivot.X}, {component.Pivot.Y}")
+                {
+                    ComponentId = component.Id,
+                    ExistingInstanceGuid = component.InstanceGuid,
+                })
+                .ToList();
+            return new CanvasChangeReviewSession(
+                "Review AI component moves",
+                source,
+                proposedDocument,
+                items) { DocumentId = global::Grasshopper.Instances.ActiveCanvas?.Document?.DocumentID };
+        }
+
+        /// <summary>
+        /// Gets accepted component instance GUIDs from a review session.
+        /// </summary>
+        /// <param name="session">Reviewed session.</param>
+        /// <returns>Accepted component identifiers.</returns>
+        public static IReadOnlySet<Guid> GetAcceptedComponentGuids(CanvasChangeReviewSession session)
+        {
+            return session.Items
+                .Where(item => item.ExistingInstanceGuid.HasValue && session.IsEffectivelyAccepted(item))
+                .Select(item => item.ExistingInstanceGuid!.Value)
+                .ToHashSet();
+        }
+
+        /// <summary>
+        /// Creates a review session for proposed live-object connections or disconnections.
+        /// </summary>
+        /// <param name="source">Tool that produced the proposal.</param>
+        /// <param name="proposals">Connection proposals.</param>
+        /// <param name="kind">Connection change category.</param>
+        /// <returns>A session whose connection indexes align with <paramref name="proposals"/>.</returns>
+        public static CanvasChangeReviewSession CreateConnectionSession(
+            string source,
+            IReadOnlyList<CanvasConnectionReviewProposal> proposals,
+            CanvasChangeKind kind)
+        {
+            if (kind != CanvasChangeKind.ConnectionAdded && kind != CanvasChangeKind.ConnectionRemoved)
+            {
+                throw new ArgumentOutOfRangeException(nameof(kind));
+            }
+
+            var document = GhJsonGrasshopper.GetByGuids(proposals
+                .SelectMany(proposal => new[] { proposal.SourceGuid, proposal.TargetGuid })
+                .Distinct());
+            var idsByGuid = document.Components
+                .Where(component => component.InstanceGuid.HasValue && component.Id.HasValue)
+                .ToDictionary(component => component.InstanceGuid!.Value, component => component.Id!.Value);
+            var connections = new List<GhJsonConnection>();
+            var items = new List<CanvasChangeReviewItem>();
+            for (var index = 0; index < proposals.Count; index++)
+            {
+                var proposal = proposals[index];
+                if (!idsByGuid.TryGetValue(proposal.SourceGuid, out var sourceId) ||
+                    !idsByGuid.TryGetValue(proposal.TargetGuid, out var targetId))
+                {
+                    continue;
+                }
+
+                var connectionIndex = connections.Count;
+                connections.Add(new GhJsonConnection
+                {
+                    From = new GhJsonConnectionEndpoint
+                    {
+                        Id = sourceId,
+                        ParamName = proposal.SourceParameter,
+                    },
+                    To = new GhJsonConnectionEndpoint
+                    {
+                        Id = targetId,
+                        ParamName = proposal.TargetParameter,
+                    },
+                });
+                var sourceComponent = document.Components.First(component => component.Id == sourceId);
+                var targetComponent = document.Components.First(component => component.Id == targetId);
+                items.Add(new CanvasChangeReviewItem(
+                    $"connection:{index}",
+                    kind,
+                    $"{sourceComponent.NickName ?? sourceComponent.Name} → {targetComponent.NickName ?? targetComponent.Name}",
+                    $"{proposal.SourceParameter ?? "first output"} → {proposal.TargetParameter ?? "first input"}")
+                {
+                    ComponentId = index,
+                    ConnectionIndex = connectionIndex,
+                });
+            }
+
+            var reviewDocument = new GhJsonDocument(
+                document.Schema,
+                document.Metadata,
+                document.Components,
+                connections,
+                document.Groups);
+            return new CanvasChangeReviewSession(
+                kind == CanvasChangeKind.ConnectionAdded ? "Review AI connections" : "Review AI disconnections",
+                source,
+                reviewDocument,
+                items) { DocumentId = global::Grasshopper.Instances.ActiveCanvas?.Document?.DocumentID };
+        }
+
+        /// <summary>
+        /// Gets accepted proposal indexes from a connection review session.
+        /// </summary>
+        /// <param name="session">Reviewed connection session.</param>
+        /// <returns>Accepted indexes into the caller's proposal list.</returns>
+        public static IReadOnlySet<int> GetAcceptedConnectionProposalIndexes(CanvasChangeReviewSession session)
+        {
+            return session.Items
+                .Where(item => item.ComponentId.HasValue && session.IsEffectivelyAccepted(item))
+                .Select(item => item.ComponentId!.Value)
+                .ToHashSet();
+        }
+
+        /// <summary>
+        /// Gets accepted instance GUIDs from a component-removal session.
+        /// </summary>
+        /// <param name="session">Reviewed removal session.</param>
+        /// <returns>Accepted live object identifiers.</returns>
+        public static IReadOnlyList<Guid> GetAcceptedRemovalGuids(CanvasChangeReviewSession session)
+        {
+            return session.Items
+                .Where(item =>
+                    item.ExistingInstanceGuid.HasValue &&
+                    session.IsEffectivelyAccepted(item))
+                .Select(item => item.ExistingInstanceGuid!.Value)
+                .ToList();
+        }
+
+        /// <summary>
+        /// Creates a selectable review for non-geometric component state changes.
+        /// </summary>
+        public static CanvasChangeReviewSession CreateComponentStateSession(
+            string source,
+            IEnumerable<Guid> instanceGuids,
+            string detail,
+            Func<Guid, string>? describeChange = null)
+        {
+            var document = GhJsonGrasshopper.GetByGuids(instanceGuids);
+            var items = document.Components
+                .Where(component => component.InstanceGuid.HasValue)
+                .Select(component => new CanvasChangeReviewItem(
+                    $"state:{component.InstanceGuid}",
+                    CanvasChangeKind.ComponentModified,
+                    component.NickName ?? component.Name ?? "Component",
+                    describeChange?.Invoke(component.InstanceGuid!.Value) ?? detail)
+                {
+                    ComponentId = component.Id,
+                    ExistingInstanceGuid = component.InstanceGuid,
+                })
+                .ToList();
+            return new CanvasChangeReviewSession(
+                "Review AI component state changes",
+                source,
+                document,
+                items) { DocumentId = global::Grasshopper.Instances.ActiveCanvas?.Document?.DocumentID };
+        }
+
+        /// <summary>
+        /// Describes a requested parameter change as "current -> requested" for review items.
+        /// Resolves the live component so the target parameter's current name/value is shown
+        /// instead of only the unchanged component preview.
+        /// </summary>
+        /// <param name="instanceGuid">Live component instance GUID.</param>
+        /// <param name="args">Tool arguments (component/script GUID keys are omitted).</param>
+        /// <param name="operation">Tool operation name.</param>
+        /// <returns>Human-readable before/after description.</returns>
+        public static string DescribeParameterChange(Guid instanceGuid, JObject args, string operation)
+        {
+            var requested = string.Join(
+                ", ",
+                (args ?? new JObject()).Properties()
+                    .Where(p => p.Name != "componentGuid" && p.Name != "scriptGuid")
+                    .Select(p => $"{p.Name}={p.Value}"));
+
+            string? current = null;
+            try
+            {
+                if (CanvasAccess.FindInstance(instanceGuid) is IGH_Component component)
+                {
+                    if (args?["parameterIndex"]?.ToObject<int?>() is int parameterIndex)
+                    {
+                        var isInput = args["isInput"]?.ToObject<bool?>() ?? true;
+                        var parameters = isInput ? component.Params.Input : component.Params.Output;
+                        current = parameterIndex >= 0 && parameterIndex < parameters.Count
+                            ? $"{(isInput ? "input" : "output")} '{parameters[parameterIndex].Name}'"
+                            : $"{(isInput ? "input" : "output")} index {parameterIndex} (out of range)";
+                    }
+                    else if (args?["index"]?.ToObject<int?>() is int index)
+                    {
+                        var input = component.Params.Input.ElementAtOrDefault(index);
+                        var output = component.Params.Output.ElementAtOrDefault(index);
+                        var param = input ?? output;
+                        current = param != null
+                            ? $"parameter '{param.Name}'"
+                            : $"parameter index {index} (out of range)";
+                    }
+                    else
+                    {
+                        current = $"'{component.NickName}'";
+                    }
+                }
+            }
+            catch
+            {
+                current = null;
+            }
+
+            return string.IsNullOrEmpty(requested)
+                ? (current == null ? operation : $"{operation}: {current}")
+                : (current == null ? $"{operation} -> {requested}" : $"{operation}: {current} -> {requested}");
+        }
+
+        /// <summary>
+        /// Measures real Grasshopper bounds for proposed components that have no live canvas
+        /// instance, so the preview overlay draws ghosts at their true footprint instead of a
+        /// fixed estimate. Components are instantiated off-document through
+        /// <see cref="GhJsonGrasshopper.Deserialize"/>; pivot handling leaves
+        /// <c>Attributes.Bounds</c> already positioned at the proposed pivot in world space.
+        /// Live components are skipped: the overlay derives their proposed bounds from the
+        /// live object's bounds translated to the proposed pivot. Best-effort only — failures
+        /// leave the overlay on its fallback bounds.
+        /// </summary>
+        /// <param name="session">Review session receiving the measured bounds.</param>
+        private static void PopulateProposedBounds(CanvasChangeReviewSession session)
+        {
+            try
+            {
+                var document = GhJsonGrasshopper.GetActiveDocument();
+                if (document == null)
+                {
+                    return;
+                }
+
+                var reviewedIds = session.Items
+                    .Where(item =>
+                        item.ComponentId.HasValue &&
+                        (item.Kind == CanvasChangeKind.ComponentAdded ||
+                         item.Kind == CanvasChangeKind.ComponentModified))
+                    .Select(item => item.ComponentId!.Value)
+                    .ToHashSet();
+                var measurable = session.ProposedDocument.Components
+                    .Where(component =>
+                        component.Id.HasValue &&
+                        component.Pivot != null &&
+                        reviewedIds.Contains(component.Id.Value) &&
+                        !(component.InstanceGuid.HasValue &&
+                          document.FindObject(component.InstanceGuid.Value, false) != null))
+                    .ToList();
+                if (measurable.Count == 0)
+                {
+                    return;
+                }
+
+                var result = GhJsonGrasshopper.Deserialize(
+                    new GhJsonDocument(
+                        session.ProposedDocument.Schema,
+                        session.ProposedDocument.Metadata,
+                        measurable,
+                        connections: null,
+                        groups: null),
+                    new DeserializationOptions
+                    {
+                        // Regenerate GUIDs so the throwaway objects never collide with live ones.
+                        RegenerateInstanceGuids = true,
+                        SkipInvalidComponents = true,
+                    });
+                foreach (var pair in result.IdToObjectMapping)
+                {
+                    var bounds = pair.Value?.Attributes?.Bounds;
+                    if (bounds.HasValue && bounds.Value.Width > 0f && bounds.Value.Height > 0f)
+                    {
+                        session.SetProposedComponentBounds(pair.Key, bounds.Value);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[CanvasChangeReviewService] Proposed bounds measurement skipped: {ex.Message}");
+            }
+        }
+
+        private static GhJsonComponent CopyWithPivot(GhJsonComponent component, GhJsonPivot pivot)
+        {
+            return new GhJsonComponent
+            {
+                Id = component.Id,
+                InstanceGuid = component.InstanceGuid,
+                ComponentGuid = component.ComponentGuid,
+                Name = component.Name,
+                NickName = component.NickName,
+                Library = component.Library,
+                Pivot = pivot,
+                InputSettings = component.InputSettings,
+                OutputSettings = component.OutputSettings,
+                ComponentState = component.ComponentState,
+                Errors = component.Errors,
+                Warnings = component.Warnings,
+                Remarks = component.Remarks,
+            };
+        }
+    }
+}

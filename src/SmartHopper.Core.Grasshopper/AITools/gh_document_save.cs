@@ -20,103 +20,99 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
+using Grasshopper.Kernel;
 using Newtonsoft.Json.Linq;
 using SmartHopper.Core.Grasshopper.Utils.Canvas;
-using SmartHopper.Infrastructure.AICall.Core.Interactions;
 using SmartHopper.Infrastructure.AICall.Core.Returns;
 using SmartHopper.Infrastructure.AICall.Tools;
 using SmartHopper.Infrastructure.AITools;
 
 namespace SmartHopper.Core.Grasshopper.AITools
 {
-    /// <summary>
-    /// Tool provider for saving the current Grasshopper document.
-    /// </summary>
+    /// <summary>Tool provider for saving the active or an explicitly selected open document.</summary>
     public class gh_document_save : IAIToolProvider
     {
-        /// <summary>
-        /// Name of the AI tool provided by this class.
-        /// </summary>
         private readonly string toolName = "gh_document_save";
 
-        /// <summary>
-        /// Returns AI tools for saving the current Grasshopper document.
-        /// </summary>
-        /// <returns>Collection of AI tools.</returns>
+        /// <inheritdoc/>
         public IEnumerable<AITool> GetTools()
         {
             yield return new AITool(
                 name: this.toolName,
-                description: "Save the current Grasshopper document. If no filePath is provided, the document is saved to its existing location. Provide a full file path to save a copy or unnamed document.",
+                description: "Save an open Grasshopper document. documentId selects a document by the id returned from gh_document_list; omit it to use the active document. If filePath is omitted, save to the document's current path.",
                 category: "Document",
-                parametersSchema: @"{
-                    ""type"": ""object"",
-                    ""properties"": {
-                        ""filePath"": {
-                            ""type"": [""string"", ""null""],
-                            ""description"": ""Optional full file path to save the document. If omitted, the current document path is used.""
-                        }
-                    }
-                }",
+                parametersSchema: @"{ ""type"": ""object"", ""properties"": { ""documentId"": { ""type"": ""string"", ""description"": ""Optional open-document id. Defaults to the active document."" }, ""filePath"": { ""type"": ""string"", ""description"": ""Optional absolute .gh or .ghx destination path. Defaults to the document's current path."" } } }",
                 execute: this.GhDocumentSaveToolAsync,
-                mutatesCanvas: false,
+                mutatesCanvas: true,
                 tags: new[] { "document", "save", "file" },
-                outputSchema: @"{ ""type"": ""object"", ""properties"": { ""filePath"": { ""type"": [""string"", ""null""] }, ""saved"": { ""type"": ""boolean"" } } }",
-                annotations: new AIToolAnnotations(readOnlyHint: false));
+                outputSchema: GhDocumentTools.SaveOutputSchema,
+                annotations: new AIToolAnnotations(readOnlyHint: false, destructiveHint: true),
+                surfaces: GhDocumentTools.InteractiveSurfaces);
         }
 
         private Task<AIReturn> GhDocumentSaveToolAsync(AIToolCall toolCall)
         {
-            var output = new AIReturn { Request = toolCall };
-
-            try
+            return GhDocumentTools.RunAsync(toolCall, args =>
             {
-                toolCall.SkipMetricsValidation = true;
-
-                AIInteractionToolCall toolInfo = toolCall.GetToolCall();
-                var args = toolInfo.GetArgumentsOrEmpty();
-                var filePath = args["filePath"]?.ToString();
-
-                if (string.IsNullOrWhiteSpace(filePath))
+                var documentId = args["documentId"]?.ToString();
+                var requestedPath = args["filePath"]?.ToString();
+                string? targetPath = null;
+                if (!string.IsNullOrWhiteSpace(requestedPath) &&
+                    !GrasshopperFilePath.TryNormalize(requestedPath, mustExist: false, out var normalizedPath, out var pathError))
                 {
-                    filePath = null;
+                    throw new ArgumentException(pathError);
+                }
+                else if (!string.IsNullOrWhiteSpace(requestedPath))
+                {
+                    targetPath = Path.GetFullPath(requestedPath);
+                }
+
+                GH_Document document;
+                if (string.IsNullOrWhiteSpace(documentId))
+                {
+                    document = CanvasAccess.GetCurrentCanvas()
+                        ?? throw new InvalidOperationException("No active Grasshopper document.");
                 }
                 else
                 {
-                    var directory = Path.GetDirectoryName(filePath);
-                    if (!string.IsNullOrWhiteSpace(directory) && !Directory.Exists(directory))
+                    document = GhDocumentTools.RequireDocument(documentId);
+                }
+
+                targetPath = string.IsNullOrWhiteSpace(targetPath) ? document.FilePath : targetPath;
+                if (string.IsNullOrWhiteSpace(targetPath))
+                {
+                    throw new InvalidOperationException("No file path is available. Provide an absolute filePath.");
+                }
+
+                var save = GhDocumentAccess.Save(document, targetPath, toolCall.CancellationToken);
+                if (save.Rejected)
+                {
+                    var rejected = new JObject
                     {
-                        Directory.CreateDirectory(directory);
-                    }
+                        ["document"] = null,
+                        ["saved"] = false,
+                        ["rejected"] = true,
+                        ["filePath"] = targetPath,
+                    };
+                    rejected.WithEnvelope(ToolResultEnvelope.Create(this.toolName, ToolResultContentType.Object, payloadPath: "document"));
+                    return Task.FromResult(rejected);
                 }
 
-                var savedPath = CanvasAccess.SaveDocument(filePath);
-                var saved = !string.IsNullOrWhiteSpace(savedPath);
-
-                if (!saved)
+                if (!save.Saved)
                 {
-                    output.CreateError("Could not save the document. No active document or no file path available.");
-                    return Task.FromResult(output);
+                    throw new InvalidOperationException($"Could not save the Grasshopper document to {targetPath}.");
                 }
 
-                var toolResult = new JObject
+                var payload = new JObject
                 {
-                    ["saved"] = saved,
-                    ["filePath"] = savedPath,
+                    ["document"] = GhDocumentAccess.Describe(document, GhDocumentAccess.GetActiveDocument()),
+                    ["saved"] = true,
+                    ["rejected"] = false,
+                    ["filePath"] = targetPath,
                 };
-
-                var body = AIBodyBuilder.Create()
-                    .AddToolResult(toolResult)
-                    .Build();
-
-                output.CreateSuccess(body, toolCall);
-                return Task.FromResult(output);
-            }
-            catch (Exception ex)
-            {
-                output.CreateError($"Error: {ex.Message}");
-                return Task.FromResult(output);
-            }
+                payload.WithEnvelope(ToolResultEnvelope.Create(this.toolName, ToolResultContentType.Object, payloadPath: "document"));
+                return Task.FromResult(payload);
+            });
         }
     }
 }

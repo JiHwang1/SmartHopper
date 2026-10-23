@@ -123,12 +123,29 @@ namespace SmartHopper.Core.Grasshopper.AITools
                     }
                 }
 
-                var document = CanvasAccess.GetCurrentCanvas();
-                var movedList = await CanvasAccess.MoveInstancesAsync(dict, relative, true, toolCall.CancellationToken, document).ConfigureAwait(false);
+                var document = await CanvasAccess.GetCurrentCanvasAsync(toolCall.CancellationToken).ConfigureAwait(false);
+                var prepared = await CanvasAccess.InvokeInDocumentAsync(document, toolCall.CancellationToken, () =>
+                {
+                    var positions = dict.Keys.ToDictionary(id => id, id => document.FindObject(id, false)?.Attributes.Pivot
+                        ?? throw new ArgumentException($"Object {id} was not found."));
+                    var absolute = dict.ToDictionary(p => p.Key, p => relative ? new PointF(positions[p.Key].X + p.Value.X, positions[p.Key].Y + p.Value.Y) : p.Value);
+                    return Task.FromResult((Positions: positions, Targets: absolute,
+                        Review: CanvasChangeReviewService.CreateMoveSession(this.toolName, absolute, relative: false)));
+                }).ConfigureAwait(false);
+                await CanvasChangeReviewService.ReviewAsync(prepared.Review, toolCall.InvocationContext, toolCall.CancellationToken).ConfigureAwait(false);
+                var accepted = CanvasChangeReviewService.GetAcceptedComponentGuids(prepared.Review);
+                var movedList = await CanvasAccess.InvokeInDocumentAsync(document, toolCall.CancellationToken, () =>
+                {
+                    if (prepared.Positions.Any(p => document.FindObject(p.Key, false)?.Attributes.Pivot != p.Value))
+                        throw new InvalidOperationException("Reviewed positions changed. Retry the move.");
+                    var allowed = prepared.Targets.Where(p => accepted.Contains(p.Key) && !CanvasProtection.IsProtected(p.Key)).ToDictionary(p => p.Key, p => p.Value);
+                    return CanvasAccess.MoveInstancesAsync(allowed, false, true, toolCall.CancellationToken, document);
+                }).ConfigureAwait(false);
 
                 var toolResult = new JObject
                 {
                     ["updated"] = JArray.FromObject(movedList.Select(g => g.ToString())),
+                    ["success"] = dict.Keys.All(id => accepted.Contains(id) && !CanvasProtection.IsProtected(id)),
                 };
 
                 var builder = AIBodyBuilder.Create();
