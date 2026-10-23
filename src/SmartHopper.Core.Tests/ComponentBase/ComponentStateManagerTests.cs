@@ -20,6 +20,7 @@ namespace SmartHopper.Core.Tests.ComponentBase
 {
     using System;
     using System.Collections.Generic;
+    using System.Reflection;
     using System.Threading;
     using System.Threading.Tasks;
     using SmartHopper.Core.ComponentBase;
@@ -695,6 +696,48 @@ namespace SmartHopper.Core.Tests.ComponentBase
 
             // Should be Processing, not NeedsRun
             Assert.Equal(ComponentState.Processing, this.manager.CurrentState);
+        }
+
+#if NET7_WINDOWS
+        [Fact(DisplayName = "ComponentStateManager: Queued stale debounce callback is ignored [Windows]")]
+#else
+        [Fact(DisplayName = "ComponentStateManager: Queued stale debounce callback is ignored [Core]")]
+#endif
+        public void StaleDebounceCallback_DoesNotConsumeRestartedDebounce()
+        {
+            this.manager.StartDebounce(ComponentState.NeedsRun, 1000);
+            var generationField = typeof(ComponentStateManager).GetField("debounceGeneration", BindingFlags.Instance | BindingFlags.NonPublic);
+            var generation = (int)generationField.GetValue(this.manager);
+
+            this.manager.StartDebounce(ComponentState.Processing, 1000);
+            var callback = typeof(ComponentStateManager).GetMethod("OnDebounceElapsed", BindingFlags.Instance | BindingFlags.NonPublic);
+
+            callback.Invoke(this.manager, new object[] { generation, ComponentState.NeedsRun });
+
+            var debounceTimeField = typeof(ComponentStateManager).GetField("debounceTimeMs", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.True((int)debounceTimeField.GetValue(this.manager) > 0);
+            Assert.Equal(ComponentState.Completed, this.manager.CurrentState);
+            this.manager.CancelDebounce();
+        }
+
+#if NET7_WINDOWS
+        [Fact(DisplayName = "ComponentStateManager: Dispose rejects new timers and ignores queued callbacks [Windows]")]
+#else
+        [Fact(DisplayName = "ComponentStateManager: Dispose rejects new timers and ignores queued callbacks [Core]")]
+#endif
+        public void Dispose_RejectsNewDebounceAndIgnoresQueuedCallback()
+        {
+            this.manager.StartDebounce(ComponentState.NeedsRun, 1000);
+            var generationField = typeof(ComponentStateManager).GetField("debounceGeneration", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            var generation = (int)generationField.GetValue(this.manager)!;
+            var callback = typeof(ComponentStateManager).GetMethod("OnDebounceElapsed", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+            this.manager.Dispose();
+
+            Assert.Throws<ObjectDisposedException>(() => this.manager.StartDebounce(ComponentState.NeedsRun, 1000));
+            callback.Invoke(this.manager, new object[] { generation, ComponentState.NeedsRun });
+
+            Assert.Equal(ComponentState.Completed, this.manager.CurrentState);
         }
 
         #endregion
