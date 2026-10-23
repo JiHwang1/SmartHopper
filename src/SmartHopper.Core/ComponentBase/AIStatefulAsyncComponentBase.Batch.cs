@@ -120,9 +120,7 @@ namespace SmartHopper.Core.ComponentBase
         private void ClearSentinelState()
         {
             Debug.WriteLine($"[AIStatefulAsync] ClearSentinelState: clearing _sentinelTrees (was {(this._batchState.SentinelTrees == null ? "null" : $"count={this._batchState.SentinelTrees.Count}")}) and _batchSentinelIds (was {(this._batchState.SentinelIds == null ? "null" : $"count={this._batchState.SentinelIds.Count}")})");
-            this._batchState.SentinelTrees = null;
-            this._batchState.SentinelIds = null;
-            this._batchState.Queue = null;
+            this._batchState.ClearSentinels();
         }
 
         /// <summary>
@@ -215,7 +213,7 @@ namespace SmartHopper.Core.ComponentBase
             // (stored via TrySubmitBatchAsync → StoreSentinelTree after we return true),
             // but we do NOT submit to the provider. Instead, we re-key the pending file-loaded
             // results to the freshly collected custom IDs (in order) and schedule finalization
-            // through the normal OnBatchFinalized pipeline.
+            // through the normal completion pipeline.
             if (this._batchCollectOnly)
             {
                 Debug.WriteLine($"[AIStatefulAsync] SubmitBatchQueueAsync: collect-only mode, queue has {queue.Count} items");
@@ -398,12 +396,7 @@ namespace SmartHopper.Core.ComponentBase
             {
                 Debug.WriteLine($"[AIStatefulAsync] Batch polling timeout exceeded for {submission.BatchId} - stopping local polling");
 
-                this.StopBatchPollTimer();
-                this._batchState.Submission = null;
-
-                this.OnBatchFinalized(AIBatchState.Expired, null, null, "Batch polling timeout exceeded (24 hours)");
-                this.StateManager.RequestTransition(ComponentState.Error, TransitionReason.Error);
-                Rhino.RhinoApp.InvokeOnUiThread(() => this.ExpireSolution(true));
+                this.FinalizeBatchFailure(AIBatchState.Expired, null, "Batch polling timeout exceeded (24 hours)");
                 return;
             }
 
@@ -455,15 +448,7 @@ namespace SmartHopper.Core.ComponentBase
                     case AIBatchState.Failed:
                     case AIBatchState.Cancelled:
                     case AIBatchState.Expired:
-                        this.StopBatchPollTimer();
-                        this._batchState.Submission = null;
-
-                        // Centralized batch finalization for terminal failure cases
-                        this.OnBatchFinalized(status.State, null, status.Messages, status.ErrorMessage);
-
-                        // Transition to Error state for terminal failures
-                        this.StateManager.RequestTransition(ComponentState.Error, TransitionReason.Error);
-                        Rhino.RhinoApp.InvokeOnUiThread(() => this.ExpireSolution(true));
+                        this.FinalizeBatchFailure(status.State, status.Messages, status.ErrorMessage);
                         break;
                 }
             }
@@ -503,17 +488,17 @@ namespace SmartHopper.Core.ComponentBase
         }
 
         /// <summary>
-        /// Centralized batch finalization handler called for both successful completion
-        /// and terminal failure states (Failed, Cancelled, Expired). Surfaces all messages
-        /// via <see cref="SurfaceMessagesFromReturn"/> and delegates to <see cref="OnBatchCompleted"/>
-        /// for success cases.
+        /// Stops polling and surfaces terminal batch failures before requesting Error.
+        /// Successful item messages are surfaced by the result reconstruction path.
         /// </summary>
         /// <param name="state">The final batch state.</param>
-        /// <param name="results">Result dictionary for success cases; null for failures.</param>
         /// <param name="messages">Item-level diagnostic messages from the provider.</param>
         /// <param name="errorMessage">Error description for failure states.</param>
-        private void OnBatchFinalized(AIBatchState state, IReadOnlyDictionary<string, JObject> results, IReadOnlyList<SHRuntimeMessage> messages, string errorMessage)
+        private void FinalizeBatchFailure(AIBatchState state, IReadOnlyList<SHRuntimeMessage> messages, string errorMessage)
         {
+            this.StopBatchPollTimer();
+            this._batchState.Submission = null;
+
             // Build a unified AIReturn to collect all messages for surfacing.
             // Skip Request/Metrics validation: this AIReturn exists solely to relay
             // already-captured messages, not to represent a real call.
@@ -522,56 +507,27 @@ namespace SmartHopper.Core.ComponentBase
                 SkipRequestValidation = true,
                 SkipMetricsValidation = true,
             };
-            var hasMessages = false;
+            unifiedReturn.AddRuntimeMessage(
+                SHRuntimeMessageSeverity.Error,
+                SHRuntimeMessageOrigin.Provider,
+                $"Batch {state.ToString().ToLowerInvariant()}: {errorMessage ?? "no details"}");
 
-            // Add terminal state message for failures
-            if (state != AIBatchState.Completed)
-            {
-                unifiedReturn.AddRuntimeMessage(
-                    SHRuntimeMessageSeverity.Error,
-                    SHRuntimeMessageOrigin.Provider,
-                    $"Batch {state.ToString().ToLowerInvariant()}: {errorMessage ?? "no details"}");
-                hasMessages = true;
-            }
-
-            // Add item-level messages only for failure states.
-            // For Completed batches, item-level messages (finish_reason, cancelled, expired)
-            // are surfaced with branch-path context inside OnBatchCompleted →
-            // ProcessBatchResults<T> / ProcessMappingsBatchResults. Surfacing them here as
-            // well would cause duplicates (once with raw custom_id, once with branch path).
-            if (state != AIBatchState.Completed && messages != null && messages.Count > 0)
+            if (messages != null)
             {
                 foreach (var msg in messages)
                 {
                     unifiedReturn.AddRuntimeMessage(msg.Severity, msg.Origin, msg.Message);
                 }
-
-                hasMessages = true;
             }
 
-            // Surface all collected messages in one call
-            if (hasMessages)
-            {
-                this.SurfaceMessagesFromReturn(unifiedReturn, "batch_item");
-            }
-
-            // For success states, delegate to the virtual OnBatchCompleted hook
-            if (state == AIBatchState.Completed && (results != null || messages?.Count > 0))
-            {
-                try
-                {
-                    this.OnBatchCompleted(results, messages);
-                }
-                catch (Exception ex)
-                {
-                    Debug.WriteLine($"[AIStatefulAsync] OnBatchCompleted error: {ex.Message}");
-                }
-            }
+            this.SurfaceMessagesFromReturn(unifiedReturn, "batch_item");
+            this.StateManager.RequestTransition(ComponentState.Error, TransitionReason.Error);
+            Rhino.RhinoApp.InvokeOnUiThread(() => this.ExpireSolution(true));
         }
 
         /// <summary>
         /// Shared batch-completion flow used by both live polling (<see cref="PollBatchStatusAsync"/>)
-        /// and manual file load (<c>LoadResultsFromFile</c>): invokes <see cref="OnBatchFinalized"/>
+        /// and manual file load (<c>LoadResultsFromFile</c>): invokes <see cref="OnBatchCompleted"/>
         /// in the <see cref="AIBatchState.Completed"/> branch, then requests the appropriate state
         /// transition (Error / NeedsRun / Completed) based on message severity and sentinel coverage,
         /// and finally expires the solution on the UI thread.
@@ -618,8 +574,19 @@ namespace SmartHopper.Core.ComponentBase
                     .ToList();
             }
 
-            // Centralized batch finalization for success case
-            this.OnBatchFinalized(AIBatchState.Completed, results, outgoingMessages, null);
+            // Reconstruct outputs through the protected hook. Item messages are surfaced
+            // there with branch context, so do not also surface them as raw custom IDs.
+            if (results != null || outgoingMessages?.Count > 0)
+            {
+                try
+                {
+                    this.OnBatchCompleted(results, outgoingMessages);
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"[AIStatefulAsync] OnBatchCompleted error: {ex.Message}");
+                }
+            }
 
             ComponentState targetState;
             TransitionReason targetReason;
@@ -653,10 +620,8 @@ namespace SmartHopper.Core.ComponentBase
                 // Bypasses IsValidTransition — required when the caller may already be in
                 // a terminal state (e.g. Error after a failed poll) and a normal
                 // RequestTransition would be rejected. Going through an intermediate
-                // Processing state is NOT an option: OnEnteringProcessing clears
-                // _sentinelTrees when _batchSubmission is null (new batch starting), which
-                // would destroy the customId → branch-path map needed to populate outputs
-                // from the freshly loaded results.
+                // Processing would reset the async workers and schedule a new solve;
+                // loaded results must complete without starting another run.
                 this.StateManager.ForceState(targetState);
             }
             else

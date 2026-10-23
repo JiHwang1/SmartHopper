@@ -142,15 +142,6 @@ namespace SmartHopper.Core.ComponentBase
             return changed;
         }
 
-        protected override void BeforeSolveInstance()
-        {
-            base.BeforeSolveInstance();
-
-            // NOTE: AIReturnSnapshot clearing is done in OnEnteringNeedsRun (on input change)
-            // and defensively in OnStateProcessing, not on every solve.
-            // This prevents metrics loss when batch completes and component re-enters Processing.
-        }
-
         /// <inheritdoc/>
         protected override void OnStateProcessing(IGH_DataAccess DA)
         {
@@ -229,23 +220,6 @@ namespace SmartHopper.Core.ComponentBase
                     }
                 }
             }
-        }
-
-        protected override void OnSolveInstancePostSolve(IGH_DataAccess DA)
-        {
-            // Skip output if batch is still active - outputs will be set after batch completes
-            if (this._batchState.Submission != null)
-            {
-                Debug.WriteLine("[AIStatefulAsync] OnSolveInstancePostSolve: Batch still active, skipping output");
-                return;
-            }
-
-            // Metrics are emitted by FinishResults.
-            // Components that set metrics synchronously in their own SolveInstance (e.g. AIChatComponent)
-            // call SetMetricsOutput(DA) directly and do not go through FinishResults.
-
-            // Badge cache was already updated in SolveInstance (before base.SolveInstance)
-            // No need to update again here - the configured model hasn't changed
         }
 
         /// <summary>

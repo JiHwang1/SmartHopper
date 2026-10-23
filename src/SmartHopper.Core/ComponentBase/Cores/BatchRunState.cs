@@ -122,6 +122,42 @@ namespace SmartHopper.Core.ComponentBase.Cores
         public AIMetricsList PersistedMetricsList { get; set; }
 
         /// <summary>
+        /// Clears the mapping and collection state before a genuinely new batch.
+        /// Ordinary run resets must preserve the trees used by a restored batch.
+        /// </summary>
+        public void ClearSentinels()
+        {
+            this.SentinelTrees = null;
+            this.SentinelIds = null;
+            this.Queue = null;
+        }
+
+        /// <summary>
+        /// Stamps the batch duration into the authoritative metrics once and returns
+        /// it so the component can stamp its serialized metrics tree as well.
+        /// A non-batch finish leaves existing metrics unchanged.
+        /// </summary>
+        public double? ConsumeCompletionTime()
+        {
+            var completionTime = this.CompletionTime;
+            if (!completionTime.HasValue)
+            {
+                return null;
+            }
+
+            if (this.PersistedMetricsList != null)
+            {
+                foreach (var entry in this.PersistedMetricsList.Entries)
+                {
+                    entry.CompletionTime = completionTime.Value;
+                }
+            }
+
+            this.CompletionTime = null;
+            return completionTime;
+        }
+
+        /// <summary>
         /// Wipes per-run scratch fields without touching the cross-run survivors
         /// (<see cref="Submission"/>, <see cref="SentinelTrees"/>). Call from
         /// <c>OnEnteringNeedsRun</c>.
@@ -144,7 +180,7 @@ namespace SmartHopper.Core.ComponentBase.Cores
         public void ResetForRestoration()
         {
             this.Submission = null;
-            this.SentinelTrees = null;
+            this.ClearSentinels();
             this.ResetForNextRun();
         }
     }

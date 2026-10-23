@@ -525,7 +525,7 @@ namespace SmartHopper.Core.ComponentBase
                 // Stage loaded results and trigger a collect-only run so the component's
                 // normal processing rebuilds sentinel trees, then SubmitBatchQueueAsync
                 // re-maps our staged results to fresh custom IDs (order-based) and
-                // finalizes through the same OnBatchFinalized pipeline.
+                // finalizes through the same CompleteBatchAndTransition pipeline.
                 Debug.WriteLine($"[AIStatefulAsync] LoadResultsFromFile: Triggering collect-only fallback run (hasSentinels={hasSentinels}, matched={matched})");
 
                 messages.Add(new SHRuntimeMessage(

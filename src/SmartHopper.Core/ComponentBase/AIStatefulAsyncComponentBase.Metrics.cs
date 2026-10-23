@@ -246,26 +246,11 @@ namespace SmartHopper.Core.ComponentBase
             // Stamp CompletionTime into every metrics entry (all branches share
             // the same batch completion time; non-batch leaves it null).
             // AIReturn.Metrics is computed fresh on every access — writing to it is a no-op.
-            if (this._batchState.CompletionTime.HasValue)
+            var completionTime = this._batchState.ConsumeCompletionTime();
+            if (completionTime.HasValue)
             {
-                var entries = this._batchState.PersistedMetricsList?.Entries;
-                if (entries != null && entries.Count > 0)
-                {
-                    foreach (var entry in entries)
-                    {
-                        entry.CompletionTime = this._batchState.CompletionTime.Value;
-                    }
-
-                    Debug.WriteLine($"[AIStatefulAsync] FinishResults: stamped CompletionTime={this._batchState.CompletionTime.Value:F2}s into {entries.Count} metric(s)");
-                }
-
-                // Also stamp into the metrics tree by updating the serialized JSON strings
-                if (this._metricsTree != null)
-                {
-                    this.StampCompletionTimeIntoMetricsTree(this._batchState.CompletionTime.Value);
-                }
-
-                this._batchState.CompletionTime = null;
+                Debug.WriteLine($"[AIStatefulAsync] FinishResults: stamped CompletionTime={completionTime.Value:F2}s into {this._batchState.PersistedMetricsList?.Entries.Count ?? 0} metric(s)");
+                this.StampCompletionTimeIntoMetricsTree(completionTime.Value);
             }
 
             // Always emit metrics (replaces the ShouldEmitMetricsInPostSolve pattern)
