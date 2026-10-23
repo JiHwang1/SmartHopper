@@ -20,6 +20,7 @@ namespace SmartHopper.Infrastructure.Tests
 {
     using System;
     using System.IO;
+    using System.Reflection;
     using Newtonsoft.Json;
     using SmartHopper.Infrastructure.Settings;
     using Xunit;
@@ -49,6 +50,21 @@ namespace SmartHopper.Infrastructure.Tests
             Assert.Equal(200, settings.DebounceTime);
             Assert.Equal("TestProvider", settings.DefaultAIProvider);
             Assert.True(settings.TrustedProviders.ContainsKey("Prov1") && settings.TrustedProviders["Prov1"]);
+        }
+
+#if NET7_WINDOWS
+        [Fact(DisplayName = "SmartHopperSettings: Invalid synthetic ciphertext is not returned [Windows]")]
+#else
+        [Fact(DisplayName = "SmartHopperSettings: Invalid synthetic ciphertext is not returned [Core]")]
+#endif
+        public void Decrypt_InvalidSyntheticLegacyCiphertext_ReturnsNull()
+        {
+            var decrypt = typeof(SmartHopperSettings).GetMethod("Decrypt", BindingFlags.Static | BindingFlags.NonPublic);
+            var decryptLegacy = typeof(SmartHopperSettings).GetMethod("DecryptLegacy", BindingFlags.Static | BindingFlags.NonPublic);
+            const string syntheticCiphertext = "not-a-valid-base64-secret";
+
+            Assert.Null(decrypt.Invoke(null, new object[] { syntheticCiphertext }));
+            Assert.Null(decryptLegacy.Invoke(null, new object[] { syntheticCiphertext }));
         }
 
         /// <summary>
