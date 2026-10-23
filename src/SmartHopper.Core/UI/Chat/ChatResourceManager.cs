@@ -28,6 +28,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Reflection;
+using System.Text;
 using System.Text.RegularExpressions;
 using Markdig;
 using SmartHopper.Infrastructure.AICall.Core.Base;
@@ -54,11 +55,13 @@ namespace SmartHopper.Core.UI.Chat
         private string _cachedErrorTemplate;
         private string _cachedCssContent;
         private string _cachedJsContent;
+        private string _cachedPurifyDataUri;
         private readonly MarkdownPipeline _markdownPipeline;
 
         // Resource names
         private const string CSS_RESOURCE = "SmartHopper.Core.UI.Chat.Resources.css.chat-styles.css";
         private const string JS_RESOURCE = "SmartHopper.Core.UI.Chat.Resources.js.chat-script.js";
+        private const string PURIFY_RESOURCE = "SmartHopper.Core.UI.Chat.Resources.js.purify.min.js";
         private const string CHAT_TEMPLATE_RESOURCE = "SmartHopper.Core.UI.Chat.Resources.templates.chat-template.html";
         private const string MESSAGE_TEMPLATE_RESOURCE = "SmartHopper.Core.UI.Chat.Resources.templates.message-template.html";
         private const string ERROR_TEMPLATE_RESOURCE = "SmartHopper.Core.UI.Chat.Resources.templates.error-template.html";
@@ -100,6 +103,7 @@ namespace SmartHopper.Core.UI.Chat
                 // Load all required resources
                 string cssContent = this.GetCssContent();
                 string jsContent = this.GetJsContent();
+                string purifyDataUri = this.GetPurifyDataUri();
                 string messageTemplate = this.GetMessageTemplate();
                 string chatTemplate = this.GetChatTemplate();
 
@@ -109,6 +113,7 @@ namespace SmartHopper.Core.UI.Chat
                 // Replace all placeholders with actual content
                 string completeHtml = chatTemplate
                     .Replace("{{cssChat}}", cssContent, StringComparison.Ordinal)
+                    .Replace("{{jsSanitizer}}", purifyDataUri, StringComparison.Ordinal)
                     .Replace("{{jsChat}}", jsContent, StringComparison.Ordinal)
                     .Replace("{{debugActionsLeft}}", this.GetDebugActionsLeftHtml(), StringComparison.Ordinal)
                     .Replace("{{messageTemplate}}", messageTemplate, StringComparison.Ordinal);
@@ -241,6 +246,17 @@ namespace SmartHopper.Core.UI.Chat
             return this._cachedJsContent;
         }
 
+        private string GetPurifyDataUri()
+        {
+            if (string.IsNullOrEmpty(this._cachedPurifyDataUri))
+            {
+                var script = this.ReadEmbeddedResource(PURIFY_RESOURCE);
+                this._cachedPurifyDataUri = "data:application/javascript;base64," + Convert.ToBase64String(Encoding.UTF8.GetBytes(script));
+            }
+
+            return this._cachedPurifyDataUri;
+        }
+
         /// <summary>
         /// Renders the reasoning panel (if any) as a collapsible HTML details block.
         /// Accepts either a raw response containing <think> tags or a plain reasoning string.
@@ -314,7 +330,7 @@ namespace SmartHopper.Core.UI.Chat
 
             // Extract metrics if available
             string contextUsage = string.Empty;
-            if (interaction.Metrics != null)
+            if (interaction.Metrics?.HasProviderCallEvidence == true)
             {
                 provider = interaction.Metrics.Provider ?? string.Empty;
                 model = interaction.Metrics.Model ?? string.Empty;
@@ -329,12 +345,8 @@ namespace SmartHopper.Core.UI.Chat
                 }
             }
 
-            // Decide whether to show metrics icon. Hide when metrics are missing or not meaningful (e.g., during streaming).
-            // Consider metrics meaningful if we have token counts or provider+model info.
-            bool hasMeaningfulMetrics =
-                (interaction.Metrics != null) &&
-                ((inTokens > 0) || (outTokens > 0) ||
-                 (!string.IsNullOrWhiteSpace(provider) && !string.IsNullOrWhiteSpace(model)));
+            // Routing metadata alone is not provider usage (for example, local conversions).
+            bool hasMeaningfulMetrics = interaction.Metrics?.HasProviderCallEvidence == true;
             string metricsClass = hasMeaningfulMetrics ? string.Empty : "hidden";
             Debug.WriteLine($"[ChatResourceManager] Metrics visibility: {(hasMeaningfulMetrics ? "show" : "hide")}; in={inTokens}, out={outTokens}, provider='{provider}', model='{model}', reason='{finishReason}'");
 

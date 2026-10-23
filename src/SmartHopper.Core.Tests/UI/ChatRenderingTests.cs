@@ -20,6 +20,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq.Expressions;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
@@ -34,6 +35,41 @@ namespace SmartHopper.Core.Tests.UI
     public class ChatRenderingTests
     {
         private static TaskCompletionSource<bool> Signal() => new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        [Fact]
+        public void InitialHtml_EmbedsSanitizerAndRestrictsWebViewCapabilities()
+        {
+            var rendererType = typeof(BatchSentinel).Assembly.GetType("SmartHopper.Core.UI.Chat.HtmlChatRenderer", true)!;
+            var renderer = Activator.CreateInstance(rendererType)!;
+            var html = (string)rendererType.GetMethod("GetInitialHtml")!.Invoke(renderer, null)!;
+
+            Assert.Contains("Content-Security-Policy", html);
+            Assert.Contains("default-src 'none'", html);
+            Assert.Contains("script-src data: 'unsafe-inline'", html);
+            Assert.Contains("style-src 'unsafe-inline'", html);
+            Assert.Contains("connect-src 'none'", html);
+            var match = Regex.Match(html, "src=\\\"data:application/javascript;base64,([^\\\"]+)\\\"");
+            Assert.True(match.Success, "Embedded DOMPurify script URI was not substituted into the chat page.");
+            var sanitizer = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(match.Groups[1].Value));
+            Assert.Contains("DOMPurify 3.4.17", sanitizer);
+            Assert.Contains("function sanitizeChatHtml", html);
+            Assert.Contains("DOMPurify.sanitize", html);
+            Assert.Equal(5, Regex.Matches(html, @"innerHTML\s*=\s*sanitizeChatHtml\(").Count);
+        }
+
+        [Fact]
+        public void NavigationPolicy_AllowsOnlyChatBridgeAndInitialBlankDocument()
+        {
+            var policyType = typeof(BatchSentinel).Assembly.GetType("SmartHopper.Core.UI.Chat.ChatNavigationPolicy", true)!;
+            var isAllowed = policyType.GetMethod("IsAllowed", BindingFlags.Static | BindingFlags.NonPublic)!;
+
+            Assert.True((bool)isAllowed.Invoke(null, new object[] { new Uri("about:blank") })!);
+            Assert.True((bool)isAllowed.Invoke(null, new object[] { new Uri("sh://event?type=send") })!);
+            Assert.True((bool)isAllowed.Invoke(null, new object[] { new Uri("clipboard://copy?text=test") })!);
+            Assert.False((bool)isAllowed.Invoke(null, new object[] { new Uri("https://example.com") })!);
+            Assert.False((bool)isAllowed.Invoke(null, new object[] { new Uri("javascript:alert(1)") })!);
+            Assert.False((bool)isAllowed.Invoke(null, new object[] { new Uri("file:///tmp/chat.html") })!);
+        }
 
         [Fact]
         public async Task Burst_CoalescesBeforeRealMarkdownRender_AndPreservesToolsAndFinal()

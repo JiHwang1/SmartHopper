@@ -65,6 +65,7 @@ namespace SmartHopper.Core.UI.Chat
         private IConversationSession _currentSession = null!;
         private System.Threading.CancellationTokenSource? _currentCts;
         private string? _pendingUserMessage;
+        private IChatDocumentTracker? documentTracker;
         private DropDown? _codexModelDropDown;
         private DropDown? _codexReasoningDropDown;
         private Label? _codexConfigurationStatus;
@@ -1214,13 +1215,27 @@ namespace SmartHopper.Core.UI.Chat
                 }
 
                 // Add the pending user message to the session
+                if (this.documentTracker == null)
+                {
+                    this.documentTracker = ChatDocumentTracking.CreateTracker();
+                    foreach (var observation in this.documentTracker?.Start() ?? Array.Empty<AIInteractionDocumentEvent>())
+                        this._currentSession.AddInteraction(observation);
+                }
+                else
+                {
+                    foreach (var observation in this.documentTracker.CollectChanges()) this._currentSession.AddInteraction(observation);
+                }
                 if (!string.IsNullOrWhiteSpace(this._pendingUserMessage))
                 {
                     this._currentSession.AddInteraction(this._pendingUserMessage);
                     this._pendingUserMessage = null; // Clear after adding
                 }
 
-                var options = new SessionOptions { ProcessTools = true, CancellationToken = this._currentCts.Token };
+                var context = await this.CreateBoundInvocationContextAsync(this._currentCts.Token).ConfigureAwait(false);
+                if (this._currentSession is CodexConversationSession codex && codex.CanvasTools is CodexCanvasToolBridge canvasBridge)
+                    canvasBridge.InvocationContext = context;
+                var options = new SessionOptions { ProcessTools = true, CancellationToken = this._currentCts.Token,
+                    MaxRunSeconds = this.maxRunSeconds, MaxRunTokens = this.maxRunTokens, InvocationContext = context };
 
                 // Always attempt streaming first - ConversationSession handles validation internally
                 // and falls back to non-streaming if streaming is not supported
@@ -1253,6 +1268,8 @@ namespace SmartHopper.Core.UI.Chat
                     DebugLog("[WebChatDialog] Streaming validation failed. Falling back to non-streaming path");
                     await this._currentSession.RunToStableResult(options).ConfigureAwait(false);
                 }
+                if (!this._currentCts.IsCancellationRequested && lastStreamReturn?.Messages?.Any(m => m.Severity == SHRuntimeMessageSeverity.Error) != true)
+                    this.documentTracker?.Rebaseline();
             }
             catch (Exception ex)
             {
@@ -1359,6 +1376,10 @@ namespace SmartHopper.Core.UI.Chat
                         case "send":
                             {
                                 var text = query.TryGetValue("text", out var txt) ? txt : string.Empty;
+                                if (query.TryGetValue("maxSeconds", out var seconds) && int.TryParse(seconds, out var parsedSeconds))
+                                    this.maxRunSeconds = Math.Clamp(parsedSeconds, 30, 1800);
+                                if (query.TryGetValue("maxTokens", out var tokens) && long.TryParse(tokens, out var parsedTokens))
+                                    this.maxRunTokens = Math.Clamp(parsedTokens, 1000, 1000000);
                                 DebugLog($"[WebChatDialog] Handling send event, text length: {text.Length}");
 
                                 // Defer to next UI tick to avoid executing scripts during navigation event
@@ -1465,9 +1486,14 @@ namespace SmartHopper.Core.UI.Chat
                         DebugLog($"[WebChatDialog] Clipboard handling error: {ex.Message}");
                     }
                 }
+                else if (ChatNavigationPolicy.IsAllowed(uri))
+                {
+                    // Eto/WebView may use about:blank as the initial local document.
+                }
                 else
                 {
-                    DebugLog($"[WebChatDialog] Allowing normal navigation to: {uri}");
+                    e.Cancel = true;
+                    DebugLog($"[WebChatDialog] Blocked navigation outside the chat bridge: {uri.Scheme}");
                 }
             }
             catch (Exception ex)
@@ -1499,6 +1525,8 @@ namespace SmartHopper.Core.UI.Chat
             {
                 DebugLog("[WebChatDialog] Dialog closing, cancelling ongoing AI calls");
                 this._isClosing = true;
+                this.documentTracker?.Dispose();
+                this.documentTracker = null;
                 this._renderScheduler.Dispose();
                 this._domUpdateQueue.Clear();
                 this._webViewInitializedTcs.TrySetCanceled();

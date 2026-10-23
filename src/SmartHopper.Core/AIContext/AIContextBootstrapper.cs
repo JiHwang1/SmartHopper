@@ -62,6 +62,8 @@ namespace SmartHopper.Core.AIContext
                     AIContextManager.RegisterProvider(new TimeContextProvider());
                     AIContextManager.RegisterProvider(new EnvironmentContextProvider());
                     AIContextManager.RegisterProvider(new FileContextProvider());
+                    AIContextManager.RegisterProvider(new SelectionContextProvider());
+                    AIContextManager.RegisterProvider(new ViewportContextProvider());
                     _initialized = true;
                     Debug.WriteLine("[AIContextBootstrapper] Context providers initialized");
                 }

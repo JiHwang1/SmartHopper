@@ -4,6 +4,7 @@
     <meta charset='utf-8'>
     <meta name='viewport' content='width=device-width, initial-scale=1'>
     <title>SmartHopper AI Chat</title>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src data: 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: https:; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none';">
     <style type="text/css">
         {{cssChat}}
     </style>
@@ -15,6 +16,7 @@
     </div>
 
     <div id='chat-container'></div>
+    <aside id="task-plan" hidden aria-live="polite"></aside>
 
     <!-- New messages indicator (shown when content arrives and user is not at bottom) -->
     <div id="new-messages-indicator" class="hidden" role="status" aria-live="polite" aria-atomic="true">
@@ -25,6 +27,10 @@
     <button id="scroll-bottom-btn" class="hidden" type="button" title="Scroll to bottom" aria-label="Scroll to bottom">↓</button>
 
     <div id="input-bar">
+        <div class="run-limits">
+            <label>Run seconds <input id="max-run-seconds" type="number" min="30" max="1800" value="300" aria-label="Maximum seconds per run"></label>
+            <label>Run tokens <input id="max-run-tokens" type="number" min="1000" max="1000000" value="100000" aria-label="Maximum tokens per run"></label>
+        </div>
         <textarea id="user-input" placeholder="Type a message..." rows="3"></textarea>
         <div class="actions">
             <div class="actions-left">
@@ -37,6 +43,7 @@
         </div>
     </div>
 
+    <script type="text/javascript" src="{{jsSanitizer}}"></script>
     <script type="text/javascript">
         {{jsChat}}
     </script>

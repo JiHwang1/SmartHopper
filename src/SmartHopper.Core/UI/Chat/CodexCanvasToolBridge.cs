@@ -39,19 +39,20 @@ namespace SmartHopper.Core.UI.Chat
     /// </summary>
     internal sealed class CodexCanvasToolBridge : ICodexCanvasToolBridge
     {
+        internal SmartHopper.Infrastructure.Consent.MutationInvocationContext? InvocationContext { get; set; }
         private static readonly HashSet<string> ReadOnlyTools = new (StringComparer.OrdinalIgnoreCase)
         {
             "gh_get", "gh_get_selected", "gh_get_selected_with_data", "gh_get_by_guid",
             "gh_get_by_guid_with_data", "gh_get_errors", "gh_get_errors_with_data", "gh_get_locked",
             "gh_get_preview_off", "gh_get_preview_on", "gh_get_visible", "gh_get_start",
-            "gh_get_start_with_data", "gh_get_end", "gh_get_end_with_data", "gh_diff",
+            "gh_get_start_with_data", "gh_get_end", "gh_get_end_with_data", "gh_diff", "gh_document_list", "gh_document_read",
             "gh_list_categories", "gh_list_components", "gh_patch_validate", "smarthopper_readme",
-            "smarthopper_workflows", "smarthopper_tool_help", "script_review",
+            "smarthopper_workflows", "smarthopper_tool_help", "script_review", "plan_propose", "plan_tasks", "canvas_screenshot", "viewport_screenshot",
         };
 
         private static readonly HashSet<string> MutationTools = new (StringComparer.OrdinalIgnoreCase)
         {
-            "gh_put", "gh_move", "gh_connect", "gh_disconnect", "gh_group", "gh_group_selected",
+            "gh_put", "gh_move", "gh_connect", "gh_disconnect", "gh_remove", "gh_set_value", "gh_run", "gh_group", "gh_group_selected",
             "gh_tidy_up", "gh_tidy_up_selected", "gh_component_toggle_lock",
             "gh_component_lock_selected", "gh_component_unlock_selected", "gh_component_toggle_preview",
             "gh_component_hide_preview_selected", "gh_component_show_preview_selected",
@@ -158,7 +159,10 @@ namespace SmartHopper.Core.UI.Chat
                     arguments["guids"] = new JArray(selectedBeforeApproval.Select(id => id.ToString("D")));
                 }
 
-                if (risk == CodexCanvasToolRisk.Mutation && this.EditingMode == CodexCanvasEditingMode.ConfirmChanges)
+                // gh_put presents the actual selectable proposal through the shared review gate.
+                if (risk == CodexCanvasToolRisk.Mutation && this.EditingMode == CodexCanvasEditingMode.ConfirmChanges &&
+                    call.Tool != "gh_put" && call.Tool != "gh_connect" && call.Tool != "gh_disconnect" && call.Tool != "gh_move" &&
+                    call.Tool != "gh_remove" && call.Tool != "gh_set_value" && call.Tool != "gh_run")
                 {
                     var approval = this.ApprovalHandler;
                     var approvalRequest = this.CreateApprovalRequest(call, selectedBeforeApproval);
@@ -236,7 +240,7 @@ namespace SmartHopper.Core.UI.Chat
                     }
                 }
 
-                return CodexDynamicToolResult.Ok(result.Payload);
+                return CodexDynamicToolResult.Ok(result.Payload, result.Images);
             }
             catch (OperationCanceledException)
             {
@@ -273,6 +277,8 @@ namespace SmartHopper.Core.UI.Chat
                 : new HashSet<string>(ReadOnlyTools.Concat(MutationTools), StringComparer.OrdinalIgnoreCase);
             return new AIToolExternalCatalogOptions
             {
+                Surface = AIToolSurface.Chat,
+                InvocationContext = this.InvocationContext,
                 EnabledTools = names,
                 ExposeMutatingTools = this.EditingMode != CodexCanvasEditingMode.ReadOnly,
                 AdditionalFilter = tool => ReadOnlyTools.Contains(tool.Name) || MutationTools.Contains(tool.Name),
@@ -283,6 +289,7 @@ namespace SmartHopper.Core.UI.Chat
         {
             return new AIToolExternalCatalogOptions
             {
+                Surface = AIToolSurface.Chat,
                 EnabledTools = new HashSet<string>(ReadOnlyTools.Concat(MutationTools), StringComparer.OrdinalIgnoreCase),
                 ExposeMutatingTools = true,
                 AdditionalFilter = tool => ReadOnlyTools.Contains(tool.Name) || MutationTools.Contains(tool.Name),
@@ -381,7 +388,7 @@ namespace SmartHopper.Core.UI.Chat
             var captureLock = name.Contains("toggle_lock") || name.Contains("lock_selected") || name.Contains("unlock_selected");
             var capturePreview = name.Contains("toggle_preview") || name.Contains("preview_selected");
             var captureConnections = name == "gh_connect" || name == "gh_disconnect";
-            var captureSerialized = toolName.StartsWith("script_", StringComparison.OrdinalIgnoreCase) ||
+            var captureSerialized = name == "gh_set_value" || toolName.StartsWith("script_", StringComparison.OrdinalIgnoreCase) ||
                 toolName.StartsWith("gh_parameter_", StringComparison.OrdinalIgnoreCase);
             foreach (var id in targets)
             {

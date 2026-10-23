@@ -10,6 +10,25 @@
 
 // Scroll thresholds (pixels)
 const SCROLL_BOTTOM_THRESHOLD = 30; // consider near-bottom within this distance
+
+// Host-validated task snapshots use text nodes so plan text never becomes executable HTML.
+function updateTaskPlan(plan) {
+    const card = document.getElementById('task-plan');
+    if (!card || !plan || !Array.isArray(plan.tasks)) return;
+    card.replaceChildren();
+    const title = document.createElement('strong');
+    title.textContent = plan.goal || 'Task plan';
+    card.appendChild(title);
+    const list = document.createElement('ol');
+    plan.tasks.slice(0, 30).forEach(task => {
+        const row = document.createElement('li');
+        row.textContent = `${task.status}: ${task.description}`;
+        row.dataset.status = task.status;
+        list.appendChild(row);
+    });
+    card.appendChild(list);
+    card.hidden = false;
+}
 const SCROLL_SHOW_BTN_THRESHOLD = 5; // show scroll-to-bottom button when farther than this
 
 // Render limits and thresholds
@@ -77,6 +96,17 @@ function enqueueDomOp(op) {
     scheduleFlush();
 }
 
+function sanitizeChatHtml(html) {
+    if (typeof DOMPurify === 'undefined') {
+        console.error('[chat-script] DOMPurify is unavailable; refusing to render HTML');
+        return '';
+    }
+    return DOMPurify.sanitize(String(html || ''), {
+        USE_PROFILES: { html: true },
+        ADD_ATTR: ['target', 'rel']
+    });
+}
+
 function flushDomOps() {
     const ops = _pendingOps.splice(0, _pendingOps.length);
     if (Math.random() <= PERF_SAMPLE_RATE) {
@@ -120,12 +150,13 @@ function cloneFromTemplate(html, context) {
     let frag = _templateCache.get(html);
     if (!frag) {
         // Guard against excessively large payloads
-        if (html.length > MAX_MESSAGE_HTML_LENGTH) {
+        const htmlLimit = /<img\s[^>]*src=["']data:image\/(png|jpeg|gif|webp);base64,/i.test(html) ? 12 * 1024 * 1024 : MAX_MESSAGE_HTML_LENGTH;
+        if (html.length > htmlLimit) {
             console.warn(`[JS] ${context}: html length ${html.length} exceeds cap ${MAX_MESSAGE_HTML_LENGTH}, truncating`);
-            html = html.slice(0, MAX_MESSAGE_HTML_LENGTH) + '…';
+            html = html.slice(0, htmlLimit) + '…';
         }
         const temp = document.createElement('div');
-        temp.innerHTML = html;
+        temp.innerHTML = sanitizeChatHtml(html);
         frag = document.createDocumentFragment();
         while (temp.firstChild) {
             frag.appendChild(temp.firstChild);
@@ -155,7 +186,7 @@ function applyPatchToExisting(existing, patchObj, context) {
     const content = existing.querySelector('.message-content') || existing;
     if (patchObj.patch === 'append') {
         const temp = document.createElement('div');
-        temp.innerHTML = patchObj.html || '';
+        temp.innerHTML = sanitizeChatHtml(patchObj.html);
         // Append children to content
         while (temp.firstChild) {
             content.appendChild(temp.firstChild);
@@ -163,7 +194,7 @@ function applyPatchToExisting(existing, patchObj, context) {
         return existing;
     }
     if (patchObj.patch === 'replace-content') {
-        content.innerHTML = patchObj.html || '';
+        content.innerHTML = sanitizeChatHtml(patchObj.html);
         return existing;
     }
     console.warn(`[JS] ${context}: unsupported patch type`, patchObj.patch);
@@ -195,7 +226,7 @@ function getContainerWithBottom(context) {
  */
 function createNodeFromHtml(messageHtml, context) {
     const tempDiv = document.createElement('div');
-    tempDiv.innerHTML = messageHtml || '';
+    tempDiv.innerHTML = sanitizeChatHtml(messageHtml);
     const node = tempDiv.firstElementChild || tempDiv.firstChild;
     if (!node) {
         console.error(`[JS] ${context}: no valid node in messageHtml`);
@@ -213,7 +244,7 @@ function createNodeFromHtml(messageHtml, context) {
  */
 function createElementFromHtml(messageHtml, context) {
     const tempDiv = document.createElement('div');
-    tempDiv.innerHTML = messageHtml || '';
+    tempDiv.innerHTML = sanitizeChatHtml(messageHtml);
     const el = tempDiv.firstElementChild || null;
     if (!el) {
         console.error(`[JS] ${context}: no valid element in HTML`);
@@ -930,7 +961,9 @@ document.addEventListener('DOMContentLoaded', function () {
 
                 // Host will append the user message; just notify and clear input for UX
                 try { setProcessing(true); } catch {}
-                const url = `sh://event?type=send&text=${encodeURIComponent(text)}`;
+                const maxSeconds = document.getElementById('max-run-seconds').value;
+                const maxTokens = document.getElementById('max-run-tokens').value;
+                const url = `sh://event?type=send&text=${encodeURIComponent(text)}&maxSeconds=${encodeURIComponent(maxSeconds)}&maxTokens=${encodeURIComponent(maxTokens)}`;
                 console.log('[JS] Navigating to:', url);
                 window.location.href = url;
                 if (input) input.value = '';
@@ -1055,6 +1088,7 @@ function setProcessing(on) {
         if (input) input.disabled = !!on;
         if (sendBtn) sendBtn.disabled = !!on;
         if (cancelBtn) cancelBtn.disabled = !on;
+        ['max-run-seconds', 'max-run-tokens'].forEach(id => { const el = document.getElementById(id); if (el) el.disabled = !!on; });
 
         // Optional: reflect disabled state via CSS class and ARIA for better a11y
         [sendBtn, cancelBtn].forEach(btn => {
@@ -1076,6 +1110,8 @@ function setProcessing(on) {
 }
 
 function resetMessages() {
+    const plan = document.getElementById('task-plan');
+    if (plan) { plan.hidden = true; plan.replaceChildren(); }
     console.log('[JS] resetMessages called');
     const chatContainer = document.getElementById('chat-container');
     if (!chatContainer) {

@@ -568,3 +568,9 @@ hr {
 #scroll-bottom-btn.hidden {
     display: none !important;
 }
+/* Per-chat plan and autonomous run limits. */
+#task-plan { margin: 8px 16px; padding: 12px; border: 1px solid #767676; border-radius: 6px; max-height: 180px; overflow: auto; }
+#task-plan li[data-status="Completed"] { text-decoration: line-through; opacity: .7; }
+#task-plan li[data-status="InProgress"] { font-weight: bold; }
+.run-limits { display: flex; gap: 12px; flex-wrap: wrap; padding-bottom: 6px; font-size: 12px; }
+.run-limits input { width: 90px; }
