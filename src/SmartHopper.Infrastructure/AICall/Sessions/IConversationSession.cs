@@ -41,6 +41,12 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
 
         void AddInteraction(string userMessage);
 
+        /// <summary>Adds a host observation without changing the pending user request.</summary>
+        void AddInteraction(IAIInteraction interaction)
+        {
+            if (interaction is AIInteractionText text) this.AddInteraction(text.Content);
+        }
+
         AIReturn GetHistoryReturn();
 
         List<IAIInteraction> GetHistoryInteractionList();

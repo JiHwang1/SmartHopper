@@ -16,7 +16,12 @@
  * along with this library; if not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
  */
 
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using Newtonsoft.Json.Linq;
+using SmartHopper.Infrastructure.AICall.Core.Interactions;
+using SmartHopper.Infrastructure.AICall.Utilities;
 
 namespace SmartHopper.Infrastructure.Mcp
 {
@@ -25,11 +30,12 @@ namespace SmartHopper.Infrastructure.Mcp
     /// </summary>
     public sealed class McpToolCallResult
     {
-        private McpToolCallResult(bool isError, JToken payload, string? errorMessage)
+        private McpToolCallResult(bool isError, JToken payload, string? errorMessage, IReadOnlyList<ToolResultImage>? images = null)
         {
             this.IsError = isError;
             this.Payload = payload;
             this.ErrorMessage = errorMessage;
+            this.Images = images ?? Array.Empty<ToolResultImage>();
         }
 
         /// <summary>Gets a value indicating whether the call failed.</summary>
@@ -44,10 +50,16 @@ namespace SmartHopper.Infrastructure.Mcp
         /// <summary>Gets the error message when <see cref="IsError"/> is <c>true</c>.</summary>
         public string? ErrorMessage { get; }
 
+        /// <summary>Gets safe image attachments emitted as MCP image content blocks.</summary>
+        public IReadOnlyList<ToolResultImage> Images { get; }
+
         /// <summary>Creates a success result.</summary>
-        public static McpToolCallResult Ok(JToken payload)
+        public static McpToolCallResult Ok(JToken payload, IReadOnlyList<ToolResultImage>? images = null)
         {
-            return new McpToolCallResult(false, payload ?? new JObject(), null);
+            var safeImages = (images ?? Array.Empty<ToolResultImage>())
+                .Where(ToolResultMediaExtractor.IsSafeImage)
+                .ToList();
+            return new McpToolCallResult(false, payload ?? new JObject(), null, safeImages);
         }
 
         /// <summary>Creates an error result.</summary>

@@ -36,6 +36,7 @@ using SmartHopper.Infrastructure.AICall.Core.Requests;
 using SmartHopper.Infrastructure.AICall.Core.Returns;
 using SmartHopper.Infrastructure.AICall.JsonSchemas;
 using SmartHopper.Infrastructure.AICall.Metrics;
+using SmartHopper.Infrastructure.AIModels;
 using SmartHopper.Infrastructure.AIProviders;
 using SmartHopper.Infrastructure.Diagnostics;
 using SmartHopper.Infrastructure.Streaming;
@@ -187,7 +188,11 @@ namespace SmartHopper.Providers.OpenRouter
                 try
                 {
                     var token = this.EncodeToJToken(interaction);
-                    if (token != null)
+                    if (token is JArray expanded)
+                    {
+                        foreach (var item in expanded) messages.Add(item);
+                    }
+                    else if (token != null)
                     {
                         messages.Add(token);
                     }
@@ -212,7 +217,7 @@ namespace SmartHopper.Providers.OpenRouter
             var body = new JObject
             {
                 ["model"] = request.Model,
-                ["messages"] = messages,
+                ["messages"] = OpenAICompatibleImageCodec.OrderToolResultImages(messages),
                 ["max_tokens"] = maxTokens,
                 ["temperature"] = temperature,
                 ["provider"] = new JObject
@@ -222,6 +227,11 @@ namespace SmartHopper.Providers.OpenRouter
                     ["data_collection"] = dataCollection,
                 },
             };
+
+            if (request.Capability.HasFlag(AICapability.AudioOutput))
+            {
+                OpenAICompatibleAudioCodec.ApplyAudioOutputParameters(body, p?.Extras);
+            }
 
             // Apply seed, top_p, and other optional parameters from extras only
             if (p?.Extras != null)
@@ -272,7 +282,7 @@ namespace SmartHopper.Providers.OpenRouter
             // Add tools if requested
             if (!string.IsNullOrWhiteSpace(request.Body.ToolFilter))
             {
-                var tools = this.GetFormattedTools(request.Body.ToolFilter);
+                var tools = this.GetFormattedTools(request.Body.ToolFilter, request.ToolSurface);
                 if (tools != null && tools.Count > 0)
                 {
                     body["tools"] = tools;
@@ -465,6 +475,8 @@ namespace SmartHopper.Providers.OpenRouter
                 }
 
                 obj["content"] = toolResultInteraction.Result?.ToString() ?? string.Empty;
+                var imageMessage = OpenAICompatibleImageCodec.ToUserImageMessage(toolResultInteraction.GetModelImages());
+                if (imageMessage != null) return new JArray { obj, imageMessage };
             }
             else if (interaction is AIInteractionToolCall toolCallInteraction)
             {
@@ -525,6 +537,13 @@ namespace SmartHopper.Providers.OpenRouter
                 {
                     obj["content"] = imageInteraction.OriginalPrompt ?? string.Empty;
                 }
+            }
+            else if (interaction is AIInteractionAudio audioInteraction)
+            {
+                var audioPart = OpenAICompatibleAudioCodec.ToInputAudioContentPart(audioInteraction);
+                obj["content"] = audioPart != null
+                    ? new JArray { audioPart }
+                    : string.Empty;
             }
             else
             {
@@ -603,6 +622,12 @@ namespace SmartHopper.Providers.OpenRouter
                     content = contentToken.ToString() ?? string.Empty;
                 }
 
+                var audioInteraction = OpenAICompatibleAudioCodec.ExtractAudioOutput(message, out var audioTranscript);
+                if (string.IsNullOrWhiteSpace(content) && !string.IsNullOrWhiteSpace(audioTranscript))
+                {
+                    content = audioTranscript;
+                }
+
                 // Extract reasoning from official OpenRouter fields (preferred over legacy content-array)
                 var reasoningToken = message["reasoning"];
                 if (reasoningToken != null && !string.IsNullOrEmpty(reasoningToken.ToString()))
@@ -651,14 +676,7 @@ namespace SmartHopper.Providers.OpenRouter
                 var usage = response["usage"] as JObject;
                 if (usage != null)
                 {
-                    var totalPromptTokens = usage["prompt_tokens"]?.Value<int>() ?? 0;
-
-                    // Extract cached tokens from nested prompt_tokens_details object
-                    var promptDetails = usage["prompt_tokens_details"] as JObject;
-                    metrics.InputTokensCached = promptDetails?["cached_tokens"]?.Value<int>() ?? 0;
-                    metrics.InputTokensPrompt = totalPromptTokens - metrics.InputTokensCached;
-
-                    metrics.OutputTokensGeneration = usage["completion_tokens"]?.Value<int>() ?? 0;
+                    OpenAIUsage.ApplyTo(metrics, usage);
                 }
 
                 var finishReason = firstChoice?["finish_reason"]?.ToString();
@@ -670,6 +688,12 @@ namespace SmartHopper.Providers.OpenRouter
                 result.Metrics = metrics;
 
                 interactions.Add(result);
+
+                if (audioInteraction != null)
+                {
+                    audioInteraction.Metrics = metrics;
+                    interactions.Add(audioInteraction);
+                }
 
                 // Extract tool calls if present
                 if (message["tool_calls"] is JArray toolCalls && toolCalls.Count > 0)
@@ -842,8 +866,8 @@ namespace SmartHopper.Providers.OpenRouter
                 var lastEmit = DateTime.UtcNow;
                 var firstChunk = true;
                 string finalFinishReason = string.Empty;
-                int promptTokens = 0;
-                int completionTokens = 0;
+
+
 
                 // Provider-local aggregate of assistant text
                 var assistantAggregate = new AIInteractionText
@@ -938,6 +962,14 @@ namespace SmartHopper.Providers.OpenRouter
                         continue;
                     }
 
+                    if (parsed["error"] is JObject streamError)
+                    {
+                        var failure = new AIReturn();
+                        failure.CreateProviderError(streamError.Value<string>("message") ?? "Provider streaming error", request);
+                        yield return failure;
+                        yield break;
+                    }
+
                     var choices = parsed["choices"] as JArray;
                     var choice = choices?.FirstOrDefault() as JObject;
                     var delta = choice?["delta"] as JObject;
@@ -945,24 +977,8 @@ namespace SmartHopper.Providers.OpenRouter
                     bool hasFinish = !string.IsNullOrEmpty(finishReason);
                     if (hasFinish) finalFinishReason = finishReason;
 
-                    // Usage metrics (may be present in final chunk)
-                    var usage = parsed["usage"] as JObject;
-                    if (usage != null)
-                    {
-                        var pt = usage["prompt_tokens"]?.Value<int?>();
-                        var ct = usage["completion_tokens"]?.Value<int?>();
-                        if (pt.HasValue) promptTokens = pt.Value;
-                        if (ct.HasValue) completionTokens = ct.Value;
-
-                        // Update aggregate metrics
-                        assistantAggregate.AppendDelta(metricsDelta: new AIMetrics
-                        {
-                            Provider = this.Provider.Name,
-                            Model = request.Model,
-                            InputTokensPrompt = pt ?? 0,
-                            OutputTokensGeneration = ct ?? 0,
-                        });
-                    }
+                    // Usage is a cumulative snapshot, not a delta.
+                    OpenAIUsage.ApplyTo(assistantAggregate.Metrics, parsed["usage"] as JObject);
 
                     // Content streaming
                     var contentDelta = delta?["content"]?.ToString();
@@ -1072,8 +1088,10 @@ namespace SmartHopper.Providers.OpenRouter
                     Provider = this.Provider.Name,
                     Model = request.Model,
                     FinishReason = string.IsNullOrEmpty(finalFinishReason) ? "stop" : finalFinishReason,
-                    InputTokensPrompt = promptTokens,
-                    OutputTokensGeneration = completionTokens,
+                    InputTokensPrompt = assistantAggregate.Metrics.InputTokensPrompt,
+                    InputTokensCached = assistantAggregate.Metrics.InputTokensCached,
+                    OutputTokensReasoning = assistantAggregate.Metrics.OutputTokensReasoning,
+                    OutputTokensGeneration = assistantAggregate.Metrics.OutputTokensGeneration,
                 };
 
                 // Align aggregate metrics finish reason as well

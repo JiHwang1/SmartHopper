@@ -101,6 +101,21 @@ namespace SmartHopper.Infrastructure.Tests.Authentication
             Assert.Single(observer.ToolResults);
         }
 
+        [Fact]
+        public async Task RunToStableResult_DisabledToolsRejectsCallsWithoutExecutingBridge()
+        {
+            var transport = new FakeTransport { EmitDynamicToolCall = true };
+            var bridge = new FakeDynamicToolBridge();
+            using var session = new CodexConversationSession(transport, "gpt-test", "system", new FakeObserver(), dynamicToolBridge: bridge);
+            session.AddInteraction("Do not run tools");
+
+            await session.RunToStableResult(new SessionOptions { ProcessTools = false });
+
+            Assert.Equal(0, bridge.ExecutionCount);
+            var response = Assert.IsType<JObject>(transport.LastServerResponseResult);
+            Assert.False(response.Value<bool>("success"));
+        }
+
         [Theory]
         [InlineData("other-thread", "turn-1", "smarthopper")]
         [InlineData("thread-1", "other-turn", "smarthopper")]
@@ -175,6 +190,24 @@ namespace SmartHopper.Infrastructure.Tests.Authentication
             Assert.Equal("안녕하세요", result.Body.Interactions.OfType<AIInteractionText>().Last().Content);
         }
 
+        [Fact]
+        public async Task TokenBudget_InterruptsBeforeDynamicTool_AndNextRunCanContinue()
+        {
+            var transport = new FakeTransport { EmitTokenUsage = true, EmitDynamicToolCall = true };
+            var bridge = new FakeDynamicToolBridge();
+            using var session = new CodexConversationSession(transport, "gpt-test", "system", new FakeObserver(), dynamicToolBridge: bridge);
+            session.AddInteraction("Stop at the budget");
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => session.RunToStableResult(new SessionOptions { MaxRunTokens = 100 }));
+            Assert.Equal(0, bridge.ExecutionCount);
+            await transport.InterruptSent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Contains("turn/interrupt", transport.Methods);
+            transport.EmitTokenUsage = false;
+            transport.EmitDynamicToolCall = false;
+            session.AddInteraction("Continue with a fresh budget");
+            var result = await session.RunToStableResult(new SessionOptions { MaxRunTokens = 100 });
+            Assert.Contains(result.Body.Interactions.OfType<AIInteractionText>(), text => text.Content == "안녕하세요");
+        }
+
         private sealed class FakeTransport : ICodexConversationTransport
         {
             public event EventHandler<CodexNotificationEventArgs>? NotificationReceived;
@@ -185,6 +218,8 @@ namespace SmartHopper.Infrastructure.Tests.Authentication
 
             public List<string> Methods { get; } = new ();
 
+            public TaskCompletionSource<bool> InterruptSent { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
             public string LastTurnInput { get; private set; } = string.Empty;
 
             public string LastThreadModel { get; private set; } = string.Empty;
@@ -194,6 +229,7 @@ namespace SmartHopper.Infrastructure.Tests.Authentication
             public string LastTurnEffort { get; private set; } = string.Empty;
 
             public bool EmitDynamicToolCall { get; set; }
+            public bool EmitTokenUsage { get; set; }
 
             public string ToolThreadId { get; set; } = "thread-1";
 
@@ -223,6 +259,11 @@ namespace SmartHopper.Infrastructure.Tests.Authentication
                 CancellationToken cancellationToken = default)
             {
                 this.Methods.Add(method);
+                if (method == "turn/interrupt")
+                {
+                    this.InterruptSent.TrySetResult(true);
+                    return Task.FromResult<JToken>(new JObject());
+                }
                 if (method == "model/list")
                 {
                     return Task.FromResult<JToken>(new JObject
@@ -274,6 +315,15 @@ namespace SmartHopper.Infrastructure.Tests.Authentication
                     _ = Task.Run(async () =>
                     {
                         await Task.Yield();
+                        if (this.EmitTokenUsage)
+                        {
+                            this.Raise("thread/tokenUsage/updated", new JObject
+                            {
+                                ["threadId"] = "thread-1", ["turnId"] = "turn-1",
+                                ["tokenUsage"] = new JObject { ["total"] = new JObject { ["totalTokens"] = 100 }, ["last"] = new JObject { ["totalTokens"] = 100 } },
+                            });
+                            return;
+                        }
                         if (this.EmitDynamicToolCall && this.ServerRequestHandler != null)
                         {
                             for (var index = 0; index < this.ToolRequestCount; index++)

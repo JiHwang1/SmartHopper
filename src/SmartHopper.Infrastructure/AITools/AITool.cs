@@ -88,6 +88,12 @@ namespace SmartHopper.Infrastructure.AITools
         /// </summary>
         public bool Enabled { get; }
 
+        /// <summary>Gets the host surfaces permitted to expose and execute the tool.</summary>
+        public AIToolSurface Surfaces { get; }
+
+        /// <summary>Gets whether the tool appears in catalogs. Compatibility aliases remain callable when false.</summary>
+        public bool Advertise { get; }
+
         /// <summary>
         /// Gets name of the tool (used for tool calls).
         /// </summary>
@@ -182,7 +188,9 @@ namespace SmartHopper.Infrastructure.AITools
             bool enabled = true,
             IReadOnlyList<string>? tags = null,
             string? outputSchema = null,
-            AIToolAnnotations? annotations = null)
+            AIToolAnnotations? annotations = null,
+            AIToolSurface surfaces = AIToolSurface.All,
+            bool advertise = true)
         {
             this.Name = name ?? throw new ArgumentNullException(nameof(name));
             this.Description = description ?? throw new ArgumentNullException(nameof(description));
@@ -193,6 +201,8 @@ namespace SmartHopper.Infrastructure.AITools
             this.BuildRequest = buildRequest;
             this.MutatesCanvas = mutatesCanvas;
             this.Enabled = enabled;
+            this.Surfaces = surfaces;
+            this.Advertise = advertise;
             this.Tags = tags ?? BuildDefaultTags(category, mutatesCanvas);
             this.OutputSchema = outputSchema ?? "{ \"type\": \"object\" }";
             this.Annotations = annotations ?? new AIToolAnnotations(

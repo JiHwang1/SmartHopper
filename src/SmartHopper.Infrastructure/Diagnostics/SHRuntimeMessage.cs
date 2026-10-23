@@ -80,6 +80,7 @@ namespace SmartHopper.Infrastructure.Diagnostics
         AuthenticationMissing = 12,
         AuthorizationFailed = 13,
         RateLimited = 14,
+        ProviderTrustWarning = 15,
 
         // Batch processing
         BatchItemError = 20,

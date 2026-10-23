@@ -212,6 +212,13 @@ namespace SmartHopper.Providers.MistralAI
                 }
 
                 messageObj["content"] = toolResultInteraction.Result?.ToString() ?? string.Empty;
+
+                // Tool messages are text-only; model-bound images go in a trailing user message.
+                var imageMessage = OpenAICompatibleImageCodec.ToUserImageMessage(toolResultInteraction.GetModelImages());
+                if (imageMessage != null)
+                {
+                    return new JArray { messageObj, imageMessage };
+                }
             }
             else if (interaction is AIInteractionToolCall toolCallInteraction)
             {
@@ -325,7 +332,15 @@ namespace SmartHopper.Providers.MistralAI
             foreach (var interaction in mergedInteractions)
             {
                 var token = this.EncodeToJToken(interaction);
-                if (token != null)
+                if (token is JArray tokenArray)
+                {
+                    // One interaction may expand to multiple messages (e.g. tool result images).
+                    foreach (var item in tokenArray)
+                    {
+                        convertedMessages.Add(item);
+                    }
+                }
+                else if (token != null)
                 {
                     convertedMessages.Add(token);
                 }
@@ -335,7 +350,7 @@ namespace SmartHopper.Providers.MistralAI
             var requestBody = new JObject
             {
                 ["model"] = request.Model,
-                ["messages"] = convertedMessages,
+                ["messages"] = OpenAICompatibleImageCodec.OrderToolResultImages(convertedMessages),
                 ["max_tokens"] = maxTokens,
                 ["temperature"] = temperature,
             };
@@ -423,7 +438,7 @@ namespace SmartHopper.Providers.MistralAI
             // Add tools if requested
             if (!string.IsNullOrWhiteSpace(toolFilter))
             {
-                var tools = this.GetFormattedTools(toolFilter);
+                var tools = this.GetFormattedTools(toolFilter, request.ToolSurface);
                 if (tools != null && tools.Count > 0)
                 {
                     requestBody["tools"] = tools;

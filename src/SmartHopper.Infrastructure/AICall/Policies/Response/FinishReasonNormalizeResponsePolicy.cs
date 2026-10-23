@@ -53,6 +53,13 @@ namespace SmartHopper.Infrastructure.AICall.Policies.Response
                     return Task.CompletedTask;
                 }
 
+                if (response.Body.Interactions.OfType<AIInteractionRuntimeMessage>()
+                    .Any(d => d.Severity == SHRuntimeMessageSeverity.Error)
+                    || response.Messages.Any(m => m.Severity == SHRuntimeMessageSeverity.Error && m.Surfaceable))
+                {
+                    return Task.CompletedTask;
+                }
+
                 var metrics = response.Metrics; // aggregated snapshot
 
                 // Try to get existing finish reason or fallback to last interaction

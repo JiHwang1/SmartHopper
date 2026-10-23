@@ -104,7 +104,7 @@ namespace SmartHopper.Infrastructure.AICall.Core.Interactions
             get
             {
                 var combined = new List<SHRuntimeMessage>();
-                var seen = new HashSet<string>(StringComparer.Ordinal);
+                var seen = new HashSet<(SHRuntimeMessageSeverity, SHRuntimeMessageOrigin, SHMessageCode, string, bool)>();
 
                 if (this.Interactions != null)
                 {
@@ -125,7 +125,7 @@ namespace SmartHopper.Infrastructure.AICall.Core.Interactions
                         {
                             foreach (var m in messages)
                             {
-                                if (!string.IsNullOrEmpty(m?.Message) && seen.Add(m.Message))
+                                if (!string.IsNullOrEmpty(m?.Message) && seen.Add((m.Severity, m.Origin, m.Code, m.Message, m.Surfaceable)))
                                 {
                                     combined.Add(m);
                                 }

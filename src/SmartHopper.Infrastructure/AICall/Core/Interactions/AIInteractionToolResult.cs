@@ -36,7 +36,24 @@ namespace SmartHopper.Infrastructure.AICall.Core.Interactions
         /// <summary>
         /// Gets or sets the result of the tool call.
         /// </summary>
-        public JObject Result { get; set; }
+        private JObject result;
+
+        public JObject Result
+        {
+            get => this.result;
+            set
+            {
+                if (ToolResultMediaExtractor.TrySplit(value, out var compact, out var images))
+                {
+                    this.result = compact;
+                    this.Images = images;
+                }
+                else this.result = value;
+            }
+        }
+
+        /// <summary>Gets or sets image attachments kept outside the textual result.</summary>
+        public List<ToolResultImage> Images { get; set; } = new List<ToolResultImage>();
 
         /// <summary>
         /// Gets or sets the structured runtime messages produced while generating this tool result.
@@ -122,7 +139,13 @@ namespace SmartHopper.Infrastructure.AICall.Core.Interactions
         /// </summary>
         public override string GetRawContentForRender()
         {
-            return this.Result != null && this.Result.HasValues ? JsonConvert.SerializeObject(this.Result, Formatting.Indented) : string.Empty;
+            var content = this.Result != null && this.Result.HasValues ? JsonConvert.SerializeObject(this.Result, Formatting.Indented) : string.Empty;
+            foreach (var image in this.Images ?? new List<ToolResultImage>())
+            {
+                if (ToolResultMediaExtractor.IsSafeImage(image))
+                    content += $"\n\n![Tool result image](data:{image.MimeType};base64,{image.ImageData})";
+            }
+            return content;
         }
 
         /// <summary>

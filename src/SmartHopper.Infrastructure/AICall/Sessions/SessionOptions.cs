@@ -45,5 +45,14 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
         public bool AllowParallelTools { get; set; }
 
         public CancellationToken CancellationToken { get; set; }
+
+        /// <summary>Maximum wall-clock seconds per run; zero disables this limit.</summary>
+        public int MaxRunSeconds { get; set; }
+
+        /// <summary>Stops subsequent calls once reported or estimated usage reaches this amount; zero disables the limit.</summary>
+        public long MaxRunTokens { get; set; }
+
+        /// <summary>Host-owned consent and task plan presenters for this run.</summary>
+        public SmartHopper.Infrastructure.Consent.MutationInvocationContext? InvocationContext { get; set; }
     }
 }

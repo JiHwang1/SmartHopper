@@ -49,6 +49,12 @@ namespace SmartHopper.Infrastructure.AICall.Tools
         /// </summary>
         public CancellationToken CancellationToken { get; set; }
 
+        /// <summary>Gets or sets the caller-owned consent and presentation context.</summary>
+        public SmartHopper.Infrastructure.Consent.MutationInvocationContext? InvocationContext { get; set; }
+
+        /// <summary>Gets or sets the execution surface; direct calls are the default.</summary>
+        public AIToolSurface Surface { get; set; } = AIToolSurface.Direct;
+
         /// <summary>
         /// Gets a value indicating whether the tool call is valid.
         /// </summary>

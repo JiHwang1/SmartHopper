@@ -16,6 +16,7 @@
  * along with this library; if not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
  */
 
+using System.Linq;
 using Newtonsoft.Json.Linq;
 
 namespace SmartHopper.Infrastructure.AICall.Core.Interactions
@@ -25,6 +26,10 @@ namespace SmartHopper.Infrastructure.AICall.Core.Interactions
     /// </summary>
     public static class AIInteractionToolCallExtensions
     {
+        /// <summary>Gets safe attachments explicitly intended for the model.</summary>
+        public static System.Collections.Generic.List<ToolResultImage> GetModelImages(this AIInteractionToolResult result)
+            => result?.Images?.Where(image => image.SendToModel && SmartHopper.Infrastructure.AICall.Utilities.ToolResultMediaExtractor.IsSafeImage(image)).ToList()
+                ?? new System.Collections.Generic.List<ToolResultImage>();
         /// <summary>
         /// Returns the tool call arguments, or an empty <see cref="JObject"/> when the tool call
         /// or its arguments are <c>null</c>.

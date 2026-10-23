@@ -87,14 +87,14 @@ namespace SmartHopper.Infrastructure.AICall.Core.Returns
             {
                 // Build a combined list without mutating private storage to avoid duplicates across calls
                 var combined = new List<SHRuntimeMessage>();
-                var seen = new HashSet<string>(StringComparer.Ordinal);
+                var seen = new HashSet<(SHRuntimeMessageSeverity, SHRuntimeMessageOrigin, SHMessageCode, string, bool)>();
 
                 // 1) Structured messages already added by code paths
                 if (this.PrivateStructuredMessages != null)
                 {
                     foreach (var m in this.PrivateStructuredMessages)
                     {
-                        if (!string.IsNullOrEmpty(m?.Message) && seen.Add(m.Message))
+                        if (!string.IsNullOrEmpty(m?.Message) && seen.Add((m.Severity, m.Origin, m.Code, m.Message, m.Surfaceable)))
                         {
                             combined.Add(m);
                         }
@@ -106,7 +106,7 @@ namespace SmartHopper.Infrastructure.AICall.Core.Returns
                 {
                     foreach (var m in this.Body.Messages)
                     {
-                        if (!string.IsNullOrEmpty(m?.Message) && seen.Add(m.Message))
+                        if (!string.IsNullOrEmpty(m?.Message) && seen.Add((m.Severity, m.Origin, m.Code, m.Message, m.Surfaceable)))
                         {
                             combined.Add(m);
                         }
@@ -118,7 +118,7 @@ namespace SmartHopper.Infrastructure.AICall.Core.Returns
                 {
                     foreach (var m in this.Request.Messages)
                     {
-                        if (!string.IsNullOrEmpty(m?.Message) && seen.Add(m.Message))
+                        if (!string.IsNullOrEmpty(m?.Message) && seen.Add((m.Severity, m.Origin, m.Code, m.Message, m.Surfaceable)))
                         {
                             combined.Add(m);
                         }
@@ -133,7 +133,7 @@ namespace SmartHopper.Infrastructure.AICall.Core.Returns
                     {
                         foreach (var m in errors)
                         {
-                            if (!string.IsNullOrEmpty(m?.Message) && seen.Add(m.Message))
+                            if (!string.IsNullOrEmpty(m?.Message) && seen.Add((m.Severity, m.Origin, m.Code, m.Message, m.Surfaceable)))
                             {
                                 combined.Add(m);
                             }
@@ -231,8 +231,17 @@ namespace SmartHopper.Infrastructure.AICall.Core.Returns
             // Extract and update provider and model from interactions
             foreach (var interaction in body.Interactions)
             {
-                interaction.Metrics.Provider = provider;
-                interaction.Metrics.Model = model;
+                // A local wrapper can carry real usage from a different fallback provider.
+                // Populate routing metadata only when the interaction does not already identify that call.
+                if (!interaction.Metrics.HasProviderCallEvidence || string.IsNullOrEmpty(interaction.Metrics.Provider))
+                {
+                    interaction.Metrics.Provider = provider;
+                }
+
+                if (!interaction.Metrics.HasProviderCallEvidence || string.IsNullOrEmpty(interaction.Metrics.Model))
+                {
+                    interaction.Metrics.Model = model;
+                }
             }
 
             // Create a new body from new interactions
@@ -317,9 +326,7 @@ namespace SmartHopper.Infrastructure.AICall.Core.Returns
             // Add structured error message instead of setting ErrorMessage directly
             this.AddRuntimeMessage(SHRuntimeMessageSeverity.Error, SHRuntimeMessageOrigin.Return, message);
 
-            this.Body = AIBodyBuilder.Create()
-                .AddError(message, metrics)
-                .Build();
+            this.SetErrorBody(message, SHRuntimeMessageOrigin.Return, metrics);
         }
 
         /// <summary>
@@ -345,9 +352,7 @@ namespace SmartHopper.Infrastructure.AICall.Core.Returns
             // Add structured message with Provider origin (not calling CreateError to avoid Return origin)
             this.AddRuntimeMessage(SHRuntimeMessageSeverity.Error, SHRuntimeMessageOrigin.Provider, $"Provider error: {rawMessage}");
 
-            this.Body = AIBodyBuilder.Create()
-                .AddError(rawMessage, null)
-                .Build();
+            this.SetErrorBody($"Provider error: {rawMessage}", SHRuntimeMessageOrigin.Provider);
         }
 
         /// <summary>
@@ -373,9 +378,7 @@ namespace SmartHopper.Infrastructure.AICall.Core.Returns
             // Add structured message with Network origin
             this.AddRuntimeMessage(SHRuntimeMessageSeverity.Error, SHRuntimeMessageOrigin.Network, $"Network error: {rawMessage}");
 
-            this.Body = AIBodyBuilder.Create()
-                .AddError(rawMessage, null)
-                .Build();
+            this.SetErrorBody($"Network error: {rawMessage}", SHRuntimeMessageOrigin.Network);
         }
 
         /// <summary>
@@ -401,9 +404,18 @@ namespace SmartHopper.Infrastructure.AICall.Core.Returns
             // Add structured message with Tool origin
             this.AddRuntimeMessage(SHRuntimeMessageSeverity.Error, SHRuntimeMessageOrigin.Tool, $"Tool error: {rawMessage}");
 
-            this.Body = AIBodyBuilder.Create()
-                .AddError(rawMessage, null)
-                .Build();
+            this.SetErrorBody($"Tool error: {rawMessage}", SHRuntimeMessageOrigin.Tool);
+        }
+
+        private void SetErrorBody(string text, SHRuntimeMessageOrigin origin, AIMetrics metrics = null)
+        {
+            this.Body = AIBodyBuilder.Create().Add(new AIInteractionRuntimeMessage
+            {
+                Content = text,
+                Origin = origin,
+                Severity = SHRuntimeMessageSeverity.Error,
+                Metrics = metrics ?? new AIMetrics(),
+            }).Build();
         }
 
         /// <summary>

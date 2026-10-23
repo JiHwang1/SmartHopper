@@ -372,7 +372,7 @@ namespace SmartHopper.Providers.DeepSeek
             // Add tools if requested
             if (!string.IsNullOrWhiteSpace(toolFilter))
             {
-                var tools = this.GetFormattedTools(toolFilter);
+                var tools = this.GetFormattedTools(toolFilter, request.ToolSurface);
                 if (tools != null && tools.Count > 0)
                 {
                     requestBody["tools"] = tools;
@@ -674,23 +674,12 @@ namespace SmartHopper.Providers.DeepSeek
             var firstChoice = choices?.FirstOrDefault() as JObject;
             var usage = response["usage"] as JObject;
 
-            // Extract reasoning tokens from nested completion_tokens_details object
-            var completionDetails = usage?["completion_tokens_details"] as JObject;
-            var reasoningTokens = completionDetails?["reasoning_tokens"]?.Value<int>() ?? 0;
-
             // Create a new metrics instance
             var metrics = new AIMetrics();
             metrics.FinishReason = firstChoice?["finish_reason"]?.ToString() ?? metrics.FinishReason;
 
-            var totalPromptTokens = usage?["prompt_tokens"]?.Value<int>() ?? 0;
+            OpenAIUsage.ApplyTo(metrics, usage);
 
-            // Extract KV cache hit tokens from nested prompt_tokens_details object
-            var promptTokensDetails = usage?["prompt_tokens_details"] as JObject;
-            metrics.InputTokensCached = promptTokensDetails?["cached_tokens"]?.Value<int>() ?? 0;
-            metrics.InputTokensPrompt = totalPromptTokens - metrics.InputTokensCached;
-
-            metrics.OutputTokensGeneration = usage?["completion_tokens"]?.Value<int>() ?? metrics.OutputTokensGeneration;
-            metrics.OutputTokensReasoning = reasoningTokens;
             return metrics;
         }
 
@@ -894,8 +883,8 @@ namespace SmartHopper.Providers.DeepSeek
                 var firstChunk = true;
                 bool hadReasoningOnlySegment = false; // Track if we emitted reasoning-only
                 string finalFinishReason = string.Empty;
-                int promptTokens = 0;
-                int completionTokens = 0;
+
+
                 string reasoning = string.Empty;
 
                 // Provider-local aggregate of assistant text
@@ -1000,6 +989,14 @@ namespace SmartHopper.Providers.DeepSeek
                         continue;
                     }
 
+                    if (parsed["error"] is JObject streamError)
+                    {
+                        var failure = new AIReturn();
+                        failure.CreateProviderError(streamError.Value<string>("message") ?? "Provider streaming error", request);
+                        yield return failure;
+                        yield break;
+                    }
+
                     var choices = parsed["choices"] as JArray;
                     var choice = choices?.FirstOrDefault() as JObject;
                     var delta = choice?["delta"] as JObject;
@@ -1010,36 +1007,8 @@ namespace SmartHopper.Providers.DeepSeek
                         finalFinishReason = finishReason;
                     }
 
-                    // Usage metrics (may be present in final chunk)
-                    var usage = parsed["usage"] as JObject;
-                    if (usage != null)
-                    {
-                        var pt = usage["prompt_tokens"]?.Value<int?>();
-                        var ct = usage["completion_tokens"]?.Value<int?>();
-                        if (pt.HasValue)
-                        {
-                            promptTokens = pt.Value;
-                        }
-
-                        if (ct.HasValue)
-                        {
-                            completionTokens = ct.Value;
-                        }
-
-                        // Extract reasoning tokens from nested completion_tokens_details object
-                        var completionDetails = usage["completion_tokens_details"] as JObject;
-                        var rt = completionDetails?["reasoning_tokens"]?.Value<int?>() ?? 0;
-
-                        // Update aggregate metrics
-                        assistantAggregate.AppendDelta(metricsDelta: new AIMetrics
-                        {
-                            Provider = this.Provider.Name,
-                            Model = request.Model,
-                            InputTokensPrompt = pt ?? 0,
-                            OutputTokensGeneration = ct ?? 0,
-                            OutputTokensReasoning = rt,
-                        });
-                    }
+                    // Usage is a cumulative snapshot, not a delta.
+                    OpenAIUsage.ApplyTo(assistantAggregate.Metrics, parsed["usage"] as JObject);
 
                     // DeepSeek-specific: reasoning/content tracking
                     bool hasReasoningUpdate = false;
@@ -1238,8 +1207,10 @@ namespace SmartHopper.Providers.DeepSeek
                     Provider = this.Provider.Name,
                     Model = request.Model,
                     FinishReason = string.IsNullOrEmpty(finalFinishReason) ? "stop" : finalFinishReason,
-                    InputTokensPrompt = promptTokens,
-                    OutputTokensGeneration = completionTokens,
+                    InputTokensPrompt = assistantAggregate.Metrics.InputTokensPrompt,
+                    InputTokensCached = assistantAggregate.Metrics.InputTokensCached,
+                    OutputTokensReasoning = assistantAggregate.Metrics.OutputTokensReasoning,
+                    OutputTokensGeneration = assistantAggregate.Metrics.OutputTokensGeneration,
                 };
 
                 // Align aggregate metrics finish reason as well

@@ -28,6 +28,70 @@ namespace SmartHopper.Infrastructure.Tests.AITools
 
     public class CanvasMutationVerifierTests
     {
+        [Theory]
+        [InlineData("old", "new", "ObservedChange")]
+        [InlineData("same", "same", "AlreadySatisfied")]
+        public void SetValue_RequiresAnAppliedTargetAndSerializedSnapshots(string oldValue, string newValue, string status)
+        {
+            var args = new JObject { ["instanceGuid"] = "target" };
+            var payload = new JObject { ["updated"] = new JArray("target") };
+            var before = Snapshot("target", new JObject { ["serialized"] = oldValue });
+            var after = Snapshot("target", new JObject { ["serialized"] = newValue });
+            Assert.Equal(status, Verify("gh_set_value", args, payload, before, after).Status);
+            Assert.False(Verify("gh_set_value", args, new JObject(), before, after).IsValid);
+            Assert.False(Verify("gh_set_value", args, payload, before, new JObject()).IsValid);
+        }
+
+        [Fact]
+        public void Run_DistinguishesReportedExecutionFromVerifiedOutputs()
+        {
+            var args = new JObject { ["instanceGuids"] = new JArray("target") };
+            var payload = new JObject { ["runGuids"] = new JArray("target") };
+            var state = Snapshot("target", new JObject());
+            Assert.Equal("ExecutionReported", Verify("gh_run", args, payload, state, state).Status);
+            payload["skippedGuids"] = new JObject { ["target"] = "Locked" };
+            Assert.False(Verify("gh_run", args, payload, state, state).IsValid);
+        }
+
+        [Fact]
+        public void Removal_RequiresReportedAndObservedAbsence()
+        {
+            var args = new JObject { ["instanceGuids"] = new JArray("target") };
+            var payload = new JObject { ["removedGuids"] = new JArray("target") };
+            var before = Snapshot("target", new JObject());
+            Assert.True(Verify("gh_remove", args, payload, before, new JObject()).IsValid);
+            Assert.False(Verify("gh_remove", args, payload, before, before).IsValid);
+        }
+
+        [Fact]
+        public void Put_AcceptsExplicitUpdateButRejectsFalseCreation()
+        {
+            var before = Snapshot("existing", new JObject());
+            var after = Snapshot("existing", new JObject());
+            var payload = new JObject { ["instanceGuids"] = new JArray("existing"), ["updatedInstanceGuids"] = new JArray("existing") };
+            Assert.True(Verify("gh_put", new JObject(), payload, before, after).IsValid);
+            payload.Remove("updatedInstanceGuids");
+            Assert.False(Verify("gh_put", new JObject(), payload, before, after).IsValid);
+        }
+
+        [Fact]
+        public void Put_RejectsUnappliedChangesAndMissingUpdates()
+        {
+            var payload = new JObject { ["instanceGuids"] = new JArray("existing"), ["updatedInstanceGuids"] = new JArray("existing") };
+            Assert.False(Verify("gh_put", new JObject(), payload, new JObject(), Snapshot("existing", new JObject())).IsValid);
+            payload["rejectedChanges"] = 1;
+            Assert.False(Verify("gh_put", new JObject(), payload, Snapshot("existing", new JObject()), Snapshot("existing", new JObject())).IsValid);
+        }
+
+        [Fact]
+        public void Put_NoOpWithExistenceOnlySnapshotsDoesNotClaimContentEquality()
+        {
+            var payload = new JObject { ["unchangedInstanceGuids"] = new JArray("existing"), ["alreadySatisfiedChanges"] = 1 };
+            var result = Verify("gh_put", new JObject(), payload, Snapshot("existing", new JObject()), Snapshot("existing", new JObject()));
+            Assert.True(result.IsValid);
+            Assert.Equal("ObservedChange", result.Status);
+        }
+
         [Fact]
         public void Move_RejectsWrongPositionEvenWhenPayloadReportsUpdated()
         {

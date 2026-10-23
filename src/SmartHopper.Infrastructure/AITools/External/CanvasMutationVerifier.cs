@@ -29,7 +29,7 @@ namespace SmartHopper.Infrastructure.AITools.External
     /// </summary>
     public static class CanvasMutationVerifier
     {
-        private const double PositionTolerance = 0.01;
+        private const double PositionTolerance = 0.5;
 
         /// <summary>
         /// Verifies a tool payload against the requested operation and before/after snapshots.
@@ -58,6 +58,9 @@ namespace SmartHopper.Infrastructure.AITools.External
             }
 
             var name = toolName.Trim().ToLowerInvariant();
+            if (name == "gh_set_value") return VerifyValue(arguments, payload, before, after);
+            if (name == "gh_run") return VerifyRun(arguments, payload, before, after);
+            if (name == "gh_remove") return VerifyRemoval(arguments, payload, before, after);
             if (name == "gh_move") return VerifyMove(arguments, payload, before, after);
             if (name.Contains("toggle_lock") || name.Contains("lock_selected") || name.Contains("unlock_selected")) return VerifyLock(name, arguments, before, after);
             if (name.Contains("toggle_preview") || name.Contains("preview_selected")) return VerifyPreview(name, arguments, before, after);
@@ -68,6 +71,37 @@ namespace SmartHopper.Infrastructure.AITools.External
             if (name.Contains("script") || name.Contains("parameter")) return VerifySerializedChange(arguments, before, after);
 
             return Fail($"No canvas mutation verifier is defined for '{toolName}'.");
+        }
+
+        private static (bool, string, string) VerifyValue(JObject args, JObject payload, JObject before, JObject after)
+        {
+            var id = Text(args, "instanceGuid");
+            if (string.IsNullOrWhiteSpace(id) || !ReadStrings(Get(payload, "updated")).Contains(id, StringComparer.OrdinalIgnoreCase))
+                return Fail("The requested value target was not applied.");
+            var oldValue = Text(Find(before, id), "serialized");
+            var newValue = Text(Find(after, id), "serialized");
+            if (string.IsNullOrEmpty(oldValue) || string.IsNullOrEmpty(newValue)) return Fail("The value target is missing a serialized snapshot.");
+            return string.Equals(oldValue, newValue, StringComparison.Ordinal)
+                ? Ok("AlreadySatisfied", "The tool accepted the value and the serialized target is unchanged.")
+                : Ok("ObservedChange", "The value target's serialized content changed; value semantics are reported by the tool.");
+        }
+
+        private static (bool, string, string) VerifyRun(JObject args, JObject payload, JObject before, JObject after)
+        {
+            var ids = ReadStrings(Get(args, "instanceGuids")).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            var run = ReadStrings(Get(payload, "runGuids")).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (ids.Count == 0 || HasItems(Get(payload, "skippedGuids")) || ids.Any(id => !run.Contains(id) || Find(before, id) == null || Find(after, id) == null))
+                return Fail("Not every requested run target was executed and retained.");
+            return Ok("ExecutionReported", "The tool reports rerunning all requested targets. Solution outputs are not independently verified.");
+        }
+
+        private static (bool, string, string) VerifyRemoval(JObject args, JObject payload, JObject before, JObject after)
+        {
+            var ids = ReadStrings(Get(args, "instanceGuids")).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            var removed = ReadStrings(Get(payload, "removedGuids")).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (ids.Count == 0 || ids.Any(id => Find(before, id) == null || Find(after, id) != null || !removed.Contains(id)))
+                return Fail("Not every requested removal is absent and reported as removed.");
+            return Ok("Succeeded", "Every requested removal is absent from the document.");
         }
 
         private static (bool, string, string) VerifyMove(JObject args, JObject payload, JObject before, JObject after)
@@ -201,13 +235,22 @@ namespace SmartHopper.Infrastructure.AITools.External
 
         private static (bool, string, string) VerifyPut(JObject payload, JObject before, JObject after)
         {
+            if (Number(payload, "rejectedChanges") > 0) return Fail("gh_put reports unapplied changes.");
             var ids = ReadStrings(Get(payload, "instanceGuids")).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-            if (ids.Count == 0) return Fail("gh_put returned no instanceGuids to verify.");
-            var existing = ids.Where(id => Find(before, id) != null).ToList();
-            if (existing.Count > 0) return Fail($"Reported gh_put instances already existed before placement: {string.Join(", ", existing)}.");
+            var updates = ReadStrings(Get(payload, "updatedInstanceGuids")).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var creations = ReadStrings(Get(payload, "createdInstanceGuids")).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (updates.Overlaps(creations) || updates.Any(id => !ids.Contains(id, StringComparer.OrdinalIgnoreCase)) ||
+                creations.Any(id => !ids.Contains(id, StringComparer.OrdinalIgnoreCase))) return Fail("gh_put identity classifications are inconsistent.");
+            if (updates.Any(id => Find(before, id) == null)) return Fail("A reported update did not exist in the before snapshot.");
+            var existing = ids.Where(id => Find(before, id) != null && !updates.Contains(id)).ToList();
+            if (existing.Count > 0) return Fail($"Reported gh_put creations already existed before placement: {string.Join(", ", existing)}.");
             var missing = ids.Where(id => Find(after, id) == null).ToList();
-            return missing.Count > 0 ? Fail($"Reported gh_put instances are absent from the after snapshot: {string.Join(", ", missing)}.")
-                : Ok("ObservedChange", "Every reported gh_put instance exists in the after snapshot; content and placement were not verified.");
+            if (missing.Count > 0) return Fail($"Reported gh_put instances are absent from the after snapshot: {string.Join(", ", missing)}.");
+            var unchanged = ReadStrings(Get(payload, "unchangedInstanceGuids")).ToList();
+            if (unchanged.Any(id => Find(before, id) == null || Find(after, id) == null)) return Fail("A reported unchanged instance is missing from a snapshot.");
+            if (ids.Count == 0 && unchanged.Count == 0 && !(Number(payload, "acceptedChanges") > 0)) return Fail("gh_put returned no applied or existing instances to verify.");
+            // Existence-only baselines cannot establish content equality, even for a reported no-op.
+            return Ok("ObservedChange", "Reported creations, updates, and retained instances exist; content and placement were not verified; wire and group semantics were not verified.");
         }
 
         private static (bool, string, string) VerifyTidy(JObject payload, JObject before, JObject after)

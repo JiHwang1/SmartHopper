@@ -21,6 +21,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -378,14 +379,8 @@ namespace SmartHopper.Infrastructure.AIProviders
             {
                 stopwatch.Stop();
                 var result = new AIReturn();
-                var metrics = new AIMetrics
-                {
-                    FinishReason = "error",
-                    CompletionTime = stopwatch.Elapsed.TotalSeconds,
-                };
-
                 // Create error; request validation messages (errors) will appear via AIReturn.Messages (Request.Messages)
-                result.CreateError("The request is not valid", request, metrics);
+                result.CreateError("The request is not valid", request);
 
                 return result;
             }
@@ -403,7 +398,11 @@ namespace SmartHopper.Infrastructure.AIProviders
 
             // Add provider specific metrics
             stopwatch.Stop();
-            response.SetCompletionTime(stopwatch.Elapsed.TotalSeconds);
+            if (response.Metrics?.HasProviderCallEvidence == true
+                || response.Body?.Interactions?.Any(i => i.Agent == AIAgent.Assistant || i.Agent == AIAgent.ToolCall) == true)
+            {
+                response.SetCompletionTime(stopwatch.Elapsed.TotalSeconds);
+            }
 
             // Execute PostCall
             response = this.PostCall(response);
@@ -662,7 +661,7 @@ namespace SmartHopper.Infrastructure.AIProviders
         /// </summary>
         /// <param name="toolFilter">The filter to apply to tool categories.</param>
         /// <returns>A JArray of formatted tool function definitions matching the filter, or null if an error occurs.</returns>
-        protected JArray GetFormattedTools(string toolFilter)
+        protected JArray GetFormattedTools(string toolFilter, AIToolSurface surface = AIToolSurface.Direct)
         {
             try
             {
@@ -678,7 +677,7 @@ namespace SmartHopper.Infrastructure.AIProviders
                 var toolFilterObj = Filtering.Parse(toolFilter);
                 foreach (var tool in tools)
                 {
-                    if (!tool.Value.Enabled)
+                    if (!tool.Value.Enabled || !tool.Value.Advertise || (tool.Value.Surfaces & surface) == 0)
                     {
                         // Skip tools that are disabled (e.g., experimental or unsupported)
                         continue;
@@ -798,7 +797,7 @@ namespace SmartHopper.Infrastructure.AIProviders
 
             Debug.WriteLine($"[{this.Name}] Call - Method: {httpMethod.ToUpper(CultureInfo.InvariantCulture)}, URL: {fullUri}");
 
-            using (var httpClient = ProviderHttpClient.Create())
+            using (var httpClient = this.CreateProviderHttpClient())
             {
                 // Apply timeout from request (should be resolved by RequestTimeoutPolicy).
                 // If somehow still null, fall back to the shared default so all layers stay aligned.
@@ -873,13 +872,16 @@ namespace SmartHopper.Infrastructure.AIProviders
                         "PATCH" => HttpMethod.Patch,
                         _ => throw new NotSupportedException($"HTTP method '{httpMethod}' is not supported. Supported methods: GET, POST, DELETE, PATCH"),
                     }, fullUri);
-                    if ((method == "POST" || method == "PATCH") && !string.IsNullOrEmpty(requestBody))
+                    if (method == "POST" || method == "PATCH")
                     {
-                        httpRequest.Content = new StringContent(requestBody, Encoding.UTF8, contentType);
+                        httpRequest.Content = this.BuildRequestContent(request);
                     }
 
                     using var response = await httpClient.SendAsync(httpRequest, cancellationToken).ConfigureAwait(false);
-                    var content = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+                    var isBinaryAudio = response.IsSuccessStatusCode && IsBinaryAudioResponse(request, response);
+                    var content = isBinaryAudio
+                        ? null
+                        : await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
                     Debug.WriteLine($"[{this.Name}] Call - Response status: {response.StatusCode}");
 
                     if (!response.IsSuccessStatusCode)
@@ -906,26 +908,40 @@ namespace SmartHopper.Infrastructure.AIProviders
 
                     // Prepare the AIReturn
                     JObject rawJObject;
-                    try
+                    if (isBinaryAudio)
                     {
-                        rawJObject = JObject.Parse(content);
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.WriteLine($"[{this.Name}] Call - Failed to parse JSON response: {ex.Message}");
-
-                        // Provide a more useful error when the API returns non-JSON content (e.g., HTML error pages)
-                        var preview = content?.Length > 200 ? content.Substring(0, 200) + "..." : content;
-                        if (!string.IsNullOrEmpty(content) && content.TrimStart().StartsWith("<", StringComparison.Ordinal))
+                        var audioBytes = await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+                        var audioMimeType = response.Content?.Headers?.ContentType?.MediaType;
+                        rawJObject = new JObject
                         {
-                            throw new Exception(
-                                $"The {this.Name} API returned an HTML response instead of JSON. " +
-                                $"This usually indicates a server error, proxy issue, or Cloudflare challenge. " +
-                                $"Response preview: {preview}");
+                            ["audio_data"] = Convert.ToBase64String(audioBytes ?? Array.Empty<byte>()),
+                            ["mime_type"] = string.IsNullOrWhiteSpace(audioMimeType) ? "audio/mpeg" : audioMimeType,
+                        };
+                        Debug.WriteLine($"[{this.Name}] Call - Normalized binary audio response: {audioBytes?.Length ?? 0} bytes ({audioMimeType ?? "audio/mpeg"})");
+                    }
+                    else
+                    {
+                        try
+                        {
+                            rawJObject = JObject.Parse(content);
                         }
+                        catch (Exception ex)
+                        {
+                            Debug.WriteLine($"[{this.Name}] Call - Failed to parse JSON response: {ex.Message}");
 
-                        throw new Exception(
-                            $"The {this.Name} API returned invalid JSON. Response preview: {preview}", ex);
+                            // Provide a more useful error when the API returns non-JSON content (e.g., HTML error pages)
+                            var preview = content?.Length > 200 ? content.Substring(0, 200) + "..." : content;
+                            if (!string.IsNullOrEmpty(content) && content.TrimStart().StartsWith("<", StringComparison.Ordinal))
+                            {
+                                throw new Exception(
+                                    $"The {this.Name} API returned an HTML response instead of JSON. " +
+                                    $"This usually indicates a server error, proxy issue, or Cloudflare challenge. " +
+                                    $"Response preview: {preview}");
+                            }
+
+                            throw new Exception(
+                                $"The {this.Name} API returned invalid JSON. Response preview: {preview}", ex);
+                        }
                     }
 
                     var aiReturn = new AIReturn();
@@ -949,6 +965,152 @@ namespace SmartHopper.Infrastructure.AIProviders
                     throw new Exception($"Error calling {this.Name} API: {ex.Message}", ex);
                 }
             }
+        }
+
+        /// <summary>
+        /// Creates the HTTP client used for a provider API call. Tests override this
+        /// seam to exercise request construction and response normalization without
+        /// opening a network connection.
+        /// </summary>
+        /// <returns>A new request-scoped client.</returns>
+        internal virtual HttpClient CreateProviderHttpClient()
+        {
+            return ProviderHttpClient.Create();
+        }
+
+        /// <summary>
+        /// Builds the HTTP request content sent by <see cref="CallApi"/>. The default
+        /// implementation wraps the provider-encoded JSON body. Providers override this
+        /// for non-JSON payloads such as transcription multipart uploads.
+        /// </summary>
+        /// <param name="request">The prepared request.</param>
+        /// <returns>The content to send, or null for a bodiless request.</returns>
+        protected virtual HttpContent BuildRequestContent(AIRequestCall request)
+        {
+            if (request?.Endpoint?.Contains("/audio/transcriptions", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                return this.BuildAudioTranscriptionContent(request);
+            }
+
+            var requestBody = request?.EncodedRequestBody;
+            return !string.IsNullOrEmpty(requestBody)
+                ? new StringContent(requestBody, Encoding.UTF8, request.ContentType)
+                : null;
+        }
+
+        /// <summary>
+        /// Builds a <c>multipart/form-data</c> transcription upload. Metadata comes from the
+        /// provider-encoded JSON body; the audio source is <c>file_url</c> when present,
+        /// otherwise the last interaction audio's bytes or file.
+        /// </summary>
+        /// <param name="request">The prepared request.</param>
+        /// <returns>Multipart content carrying the audio source and form metadata.</returns>
+        protected virtual HttpContent BuildAudioTranscriptionContent(AIRequestCall request)
+        {
+            JObject metadata = null;
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(request?.EncodedRequestBody))
+                {
+                    metadata = JObject.Parse(request.EncodedRequestBody);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[{this.Name}] Failed to parse transcription metadata body: {ex.Message}");
+            }
+
+            var hasFileUrl = !string.IsNullOrWhiteSpace(metadata?["file_url"]?.ToString());
+            var audioInteraction = request?.Body?.Interactions?
+                .OfType<AIInteractionAudio>()
+                .LastOrDefault();
+            OpenAICompatibleAudioCodec.TryResolveAudioBytes(audioInteraction, out var audioBytes, out var format);
+            var hasAudioBytes = audioBytes != null && audioBytes.Length > 0;
+
+            if (!hasAudioBytes && !hasFileUrl)
+            {
+                throw new InvalidOperationException(
+                    $"Audio transcription request for '{this.Name}' has no audio source: the request carries no resolvable audio data and no 'file_url'.");
+            }
+
+            var multipart = new MultipartFormDataContent();
+            if (!hasFileUrl)
+            {
+                var fileContent = new ByteArrayContent(audioBytes);
+                var mimeType = string.IsNullOrWhiteSpace(audioInteraction.MimeType)
+                    ? $"audio/{format}"
+                    : audioInteraction.MimeType;
+                fileContent.Headers.ContentType = new MediaTypeHeaderValue(mimeType);
+                var fileName = !string.IsNullOrWhiteSpace(audioInteraction.FilePath)
+                    ? System.IO.Path.GetFileName(audioInteraction.FilePath)
+                    : $"audio.{format}";
+                multipart.Add(fileContent, "file", fileName);
+            }
+
+            if (metadata != null)
+            {
+                foreach (var property in metadata.Properties())
+                {
+                    if (property.Value is JValue scalar && scalar.Type != JTokenType.Null)
+                    {
+                        multipart.Add(new StringContent(FormatFormScalar(scalar)), property.Name);
+                    }
+                    else if (property.Value is JArray array)
+                    {
+                        foreach (var element in array.OfType<JValue>())
+                        {
+                            multipart.Add(new StringContent(FormatFormScalar(element)), $"{property.Name}[]");
+                        }
+                    }
+                    else if (property.Value is JObject nested)
+                    {
+                        multipart.Add(new StringContent(nested.ToString(Newtonsoft.Json.Formatting.None)), property.Name);
+                    }
+                }
+            }
+
+            if (metadata?["model"] == null && !string.IsNullOrWhiteSpace(request?.Model))
+            {
+                multipart.Add(new StringContent(request.Model), "model");
+            }
+
+            if (metadata?["language"] == null && !string.IsNullOrWhiteSpace(audioInteraction?.LanguageHint))
+            {
+                multipart.Add(new StringContent(audioInteraction.LanguageHint), "language");
+            }
+
+            request.ContentType = "multipart/form-data";
+            return multipart;
+        }
+
+        /// <summary>Formats a scalar form value invariantly for multipart fields.</summary>
+        private static string FormatFormScalar(JValue value)
+        {
+            if (value.Type == JTokenType.Boolean)
+            {
+                return value.Value<bool>() ? "true" : "false";
+            }
+
+            return Convert.ToString(value.Value, CultureInfo.InvariantCulture) ?? string.Empty;
+        }
+
+        /// <summary>
+        /// Detects a successful raw audio response from its media type, with a fallback
+        /// for speech endpoints that omit or misreport the content type.
+        /// </summary>
+        private static bool IsBinaryAudioResponse(AIRequestCall request, HttpResponseMessage response)
+        {
+            var mediaType = response?.Content?.Headers?.ContentType?.MediaType;
+            if (!string.IsNullOrWhiteSpace(mediaType) &&
+                mediaType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return request?.Endpoint?.Contains("/audio/speech", StringComparison.OrdinalIgnoreCase) == true &&
+                (string.IsNullOrWhiteSpace(mediaType) ||
+                 (!mediaType.StartsWith("application/json", StringComparison.OrdinalIgnoreCase) &&
+                  !mediaType.StartsWith("text/", StringComparison.OrdinalIgnoreCase)));
         }
 
         /// <summary>

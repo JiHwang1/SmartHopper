@@ -82,40 +82,36 @@ namespace SmartHopper.Core.ComponentBase
             }
 
             // Fallback for components that do not populate _metricsTree (legacy / sync paths)
-            var metricsList = this._batchState.PersistedMetricsList;
-            var fallbackMetrics = metricsList == null ? this.AIReturnSnapshot?.Metrics : null;
-
-            if (metricsList == null && fallbackMetrics == null)
+            var entries = this._batchState.PersistedMetricsList?.Entries
+                .Where(m => m?.HasProviderCallEvidence == true).ToList() ?? new List<AIMetrics>();
+            var fallbackMetrics = this.AIReturnSnapshot?.Metrics;
+            if (entries.Count == 0 && fallbackMetrics?.HasProviderCallEvidence == true)
             {
-                Debug.WriteLine("[AIStatefulComponentBase] Empty metrics, skipping");
+                entries.Add(fallbackMetrics);
+            }
+
+            if (entries.Count == 0)
+            {
+                this.SetPersistentOutput(WellKnownInputs.Metrics, new GH_Structure<GH_String>(), dA);
                 return;
             }
 
             JToken metricsToken;
 
-            if (metricsList != null && metricsList.Entries.Count > 0)
+            if (entries.Count > 1)
             {
-                if (metricsList.Entries.Count == 1)
+                var array = new JArray();
+                foreach (var entry in entries)
                 {
-                    // Single entry → plain JObject (no breaking change)
-                    metricsToken = this.SerializeMetricsEntry(metricsList.Entries[0]);
+                    array.Add(this.SerializeMetricsEntry(entry));
                 }
-                else
-                {
-                    // Multiple entries (multi-branch or multi-provider) → JArray
-                    var array = new JArray();
-                    foreach (var entry in metricsList.Entries)
-                    {
-                        array.Add(this.SerializeMetricsEntry(entry));
-                    }
 
-                    metricsToken = array;
-                }
+                metricsToken = array;
             }
             else
             {
                 // Fallback to single AIMetrics from AIReturn snapshot
-                metricsToken = this.SerializeMetricsEntry(fallbackMetrics);
+                metricsToken = this.SerializeMetricsEntry(entries[0]);
             }
 
             var metricsJsonString = metricsToken.ToString();
@@ -206,7 +202,7 @@ namespace SmartHopper.Core.ComponentBase
         /// <param name="role">Optional role label for the metrics entry (e.g. "main", "fallback:ImageToText").</param>
         protected void CombineIntoPersistedMetrics(AIMetrics metrics, string role = null)
         {
-            if (metrics == null) return;
+            if (metrics?.HasProviderCallEvidence != true) return;
             this._batchState.PersistedMetricsList ??= new Infrastructure.AICall.Metrics.AIMetricsList();
             this._batchState.PersistedMetricsList.Add(metrics, role);
             this.AppendMetricToTree(metrics);

@@ -109,6 +109,11 @@ namespace SmartHopper.Core.ComponentBase
                     continue;
                 }
 
+                if (!ProviderTrustWarningDeduplicator.ShouldSurface(item))
+                {
+                    continue;
+                }
+
                 // Map structured severity to GH level
                 GH_RuntimeMessageLevel level = item.Severity switch
                 {

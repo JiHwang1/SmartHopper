@@ -120,16 +120,15 @@ namespace SmartHopper.Core.ComponentBase
         {
             if (result != null)
             {
-                this.AIReturnSnapshot = result;
+                var metrics = result.Metrics;
 
                 // Accumulate per-branch metrics for non-batch multi-branch solves.
                 // Batch mode skips this path (sentinels are returned before ProcessAIResult).
-                if (result.Metrics != null)
+                if (metrics?.HasProviderCallEvidence == true)
                 {
-                    var metrics = result.Metrics;
+                    this.AIReturnSnapshot = result;
                     metrics.DataCount = 1; // One AI call = one processing unit
                     this.CombineIntoPersistedMetrics(metrics, "main");
-                    this.AppendMetricToTree(metrics);
                 }
             }
 
@@ -145,7 +144,7 @@ namespace SmartHopper.Core.ComponentBase
         /// </summary>
         private void AppendMetricToTree(AIMetrics metrics)
         {
-            if (metrics == null) return;
+            if (metrics?.HasProviderCallEvidence != true) return;
             this._metricsTree ??= new GH_Structure<GH_String>();
             var path = this._currentProcessingPath ?? new GH_Path(0);
             var json = this.SerializeMetricsEntry(metrics).ToString();
@@ -160,7 +159,7 @@ namespace SmartHopper.Core.ComponentBase
         /// </summary>
         protected void AppendMetricToTreeAtPath(AIMetrics metrics, GH_Path path)
         {
-            if (metrics == null || path == null) return;
+            if (metrics?.HasProviderCallEvidence != true || path == null) return;
             this._metricsTree ??= new GH_Structure<GH_String>();
             var json = this.SerializeMetricsEntry(metrics).ToString();
             this._metricsTree.Append(new GH_String(json), path);

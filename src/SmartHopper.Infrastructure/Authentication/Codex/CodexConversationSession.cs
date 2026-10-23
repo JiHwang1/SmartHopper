@@ -60,9 +60,14 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
         private string? threadId;
         private string? activeTurnId;
         private string? pendingUserMessage;
+        private string pendingDocumentContext = string.Empty;
         private CancellationTokenSource? activeToolCancellation;
         private AIReturn lastReturn = CreateReturn(Array.Empty<IAIInteraction>());
         private bool dynamicToolsFallbackReported;
+        private bool processToolsForTurn = true;
+        private long maxTokensForTurn;
+        private long? reportedTotalTokens;
+        private long? tokenBaselineForTurn;
         private int disposed;
 
         public CodexConversationSession(
@@ -229,6 +234,19 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
             }
         }
 
+        public void AddInteraction(IAIInteraction interaction)
+        {
+            if (interaction == null) return;
+            lock (this.sync)
+            {
+                this.history.Add(interaction);
+                if (interaction is AIInteractionDocumentEvent observation)
+                    this.pendingDocumentContext += "\n[Canvas observation] " + observation.Content;
+                this.UpdateLastReturn();
+            }
+            this.observer.OnInteractionCompleted(interaction);
+        }
+
         public List<IAIInteraction> GetHistoryInteractionList()
         {
             lock (this.sync)
@@ -259,7 +277,9 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
 
         public async Task<AIReturn> RunToStableResult(SessionOptions options, CancellationToken cancellationToken = default)
         {
-            return await this.RunTurnAsync(cancellationToken).ConfigureAwait(false);
+            using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(options.CancellationToken, cancellationToken);
+            if (options.MaxRunSeconds > 0) linkedCancellation.CancelAfter(TimeSpan.FromSeconds(options.MaxRunSeconds));
+            return await this.RunTurnAsync(options.ProcessTools, linkedCancellation.Token, options.MaxRunTokens).ConfigureAwait(false);
         }
 
         public async IAsyncEnumerable<AIReturn> Stream(
@@ -267,7 +287,9 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
             StreamingOptions streamingOptions,
             [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
-            yield return await this.RunTurnAsync(cancellationToken).ConfigureAwait(false);
+            using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(options.CancellationToken, cancellationToken);
+            if (options.MaxRunSeconds > 0) linkedCancellation.CancelAfter(TimeSpan.FromSeconds(options.MaxRunSeconds));
+            yield return await this.RunTurnAsync(options.ProcessTools, linkedCancellation.Token, options.MaxRunTokens).ConfigureAwait(false);
         }
 
         public void Cancel()
@@ -328,11 +350,18 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
             this.dynamicToolBridge?.Dispose();
         }
 
-        private async Task<AIReturn> RunTurnAsync(CancellationToken cancellationToken)
+        private async Task<AIReturn> RunTurnAsync(bool processTools, CancellationToken cancellationToken, long maxTokens = 0)
         {
             await this.turnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            this.maxTokensForTurn = maxTokens;
+            this.tokenBaselineForTurn = this.reportedTotalTokens;
             try
             {
+                lock (this.sync)
+                {
+                    this.processToolsForTurn = processTools;
+                }
+
                 return await this.RunTurnCoreAsync(cancellationToken).ConfigureAwait(false);
             }
             finally
@@ -349,6 +378,11 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
             {
                 userMessage = this.pendingUserMessage;
                 this.pendingUserMessage = null;
+                if (!string.IsNullOrWhiteSpace(userMessage))
+                {
+                    userMessage = this.pendingDocumentContext + "\n\n" + userMessage;
+                    this.pendingDocumentContext = string.Empty;
+                }
             }
 
             if (string.IsNullOrWhiteSpace(userMessage))
@@ -548,7 +582,7 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
             lock (this.sync)
             {
                 if (Volatile.Read(ref this.disposed) != 0 || this.turnCompleted == null ||
-                    (notification.Method != "item/agentMessage/delta" && notification.Method != "turn/completed") ||
+                    (notification.Method != "item/agentMessage/delta" && notification.Method != "turn/completed" && notification.Method != "thread/tokenUsage/updated") ||
                     notification.Parameters["threadId"]?.Type != JTokenType.String ||
                     !string.Equals(notification.Parameters.Value<string>("threadId"), this.threadId, StringComparison.Ordinal))
                 {
@@ -576,7 +610,19 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
                 return;
             }
 
-            if (notification.Method == "item/agentMessage/delta")
+            if (notification.Method == "thread/tokenUsage/updated")
+            {
+                var total = notification.Parameters["tokenUsage"]?["total"]?.Value<long?>("totalTokens");
+                var last = notification.Parameters["tokenUsage"]?["last"]?.Value<long?>("totalTokens") ?? 0;
+                if (total >= 0)
+                {
+                    this.tokenBaselineForTurn ??= Math.Max(0, total.Value - Math.Max(0, last));
+                    this.reportedTotalTokens = total;
+                    if (this.maxTokensForTurn > 0 && total.Value - this.tokenBaselineForTurn.Value >= this.maxTokensForTurn)
+                        this.Cancel();
+                }
+            }
+            else if (notification.Method == "item/agentMessage/delta")
             {
                 var delta = notification.Parameters.Value<string>("delta");
                 if (string.IsNullOrEmpty(delta))
@@ -634,13 +680,21 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
             CancellationToken toolCancellation;
             Task<string>? started;
             Task<JObject>? completion;
+            bool processTools;
             lock (this.sync)
             {
+                processTools = this.processToolsForTurn;
                 currentThread = this.threadId;
                 currentTurn = this.activeTurnId;
                 toolCancellation = this.activeToolCancellation?.Token ?? CancellationToken.None;
                 started = this.turnStarted?.Task;
                 completion = this.turnCompleted?.Task;
+            }
+
+            if (!processTools)
+            {
+                await this.SendToolResultAsync(request.RequestId, CodexDynamicToolResult.Error("Tool execution is disabled for this turn."), CancellationToken.None).ConfigureAwait(false);
+                return;
             }
 
             if (currentTurn == null && started != null)
@@ -728,6 +782,7 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
 
             this.observer.OnToolResult(new AIInteractionToolResult
             {
+                Images = result.Images.ToList(),
                 Id = call.CallId,
                 Name = call.Tool,
                 TurnId = call.TurnId,

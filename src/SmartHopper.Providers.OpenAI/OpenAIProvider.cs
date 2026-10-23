@@ -152,6 +152,14 @@ namespace SmartHopper.Providers.OpenAI
                 // Text-to-Speech (TTS) endpoint
                 request.Endpoint = "/audio/speech";
             }
+            else if (request.Capability.HasFlag(AICapability.AudioInput)
+                     || request.Capability.HasFlag(AICapability.AudioOutput)
+                     || (request.Body?.Interactions?.OfType<AIInteractionAudio>().Any() ?? false))
+            {
+                // Multimodal chat audio is carried by Chat Completions; the Responses API
+                // cannot carry input_audio payloads or request message.audio output.
+                request.Endpoint = "/chat/completions";
+            }
             else if (request.Endpoint == "/models")
             {
                 request.HttpMethod = "GET";
@@ -243,11 +251,35 @@ namespace SmartHopper.Providers.OpenAI
             {
                 if (interaction is AIInteractionToolResult toolResultResp)
                 {
+                    var outputImages = toolResultResp.GetModelImages();
+                    JToken output = toolResultResp.Result?.ToString() ?? string.Empty;
+                    if (outputImages.Count > 0)
+                    {
+                        var outputParts = new JArray
+                        {
+                            new JObject
+                            {
+                                ["type"] = "input_text",
+                                ["text"] = output.ToString(),
+                            },
+                        };
+                        foreach (var img in outputImages)
+                        {
+                            outputParts.Add(new JObject
+                            {
+                                ["type"] = "input_image",
+                                ["image_url"] = $"data:{img.MimeType ?? "image/png"};base64,{img.ImageData}",
+                            });
+                        }
+
+                        output = outputParts;
+                    }
+
                     return new JObject
                     {
                         ["type"] = "function_call_output",
                         ["call_id"] = toolResultResp.Id,
-                        ["output"] = toolResultResp.Result?.ToString() ?? string.Empty,
+                        ["output"] = output,
                     };
                 }
 
@@ -323,6 +355,15 @@ namespace SmartHopper.Providers.OpenAI
                 }
 
                 messageObj["content"] = toolResultInteraction.Result?.ToString() ?? string.Empty;
+
+                // Chat Completions tool messages are text-only; emit model-bound images as a
+                // trailing user message. EncodeToJToken returns JToken, so a JArray is flattened
+                // by BuildFormattedMessages into consecutive messages.
+                var imageMessage = OpenAICompatibleImageCodec.ToUserImageMessage(toolResultInteraction.GetModelImages());
+                if (imageMessage != null)
+                {
+                    return new JArray { messageObj, imageMessage };
+                }
             }
             else if (interaction is AIInteractionToolCall toolCallInteraction)
             {
@@ -387,6 +428,15 @@ namespace SmartHopper.Providers.OpenAI
                     var contentArray = new JArray { imageBlock };
                     messageObj["content"] = contentArray;
                 }
+            }
+            else if (interaction is AIInteractionAudio audioInteraction)
+            {
+                // OpenAI-compatible chat audio input shape. The Responses API is intentionally
+                // not supported here because it has no input_audio content item.
+                var audioPart = OpenAICompatibleAudioCodec.ToInputAudioContentPart(audioInteraction);
+                messageObj["content"] = audioPart != null
+                    ? new JArray { audioPart }
+                    : string.Empty;
             }
             else
             {
@@ -458,7 +508,16 @@ namespace SmartHopper.Providers.OpenAI
             foreach (var interaction in mergedInteractions)
             {
                 var token = this.EncodeToJToken(interaction, format);
-                if (token != null)
+                if (token is JArray tokenArray)
+                {
+                    // A single interaction may expand to multiple messages (e.g. a tool result
+                    // whose images must be sent as a trailing user message).
+                    foreach (var item in tokenArray)
+                    {
+                        messages.Add(item);
+                    }
+                }
+                else if (token != null)
                 {
                     messages.Add(token);
                 }
@@ -500,7 +559,7 @@ namespace SmartHopper.Providers.OpenAI
             }
 #endif
 
-            return messages;
+            return format == OpenAIRequestFormat.ChatCompletions ? OpenAICompatibleImageCodec.OrderToolResultImages(messages) : messages;
         }
 
         /// <inheritdoc/>
@@ -538,9 +597,28 @@ namespace SmartHopper.Providers.OpenAI
                     dummyRequest.Body = body;
                     return this.ProcessImageGenerationResponseData(response, dummyRequest);
                 }
-                else if (response["text"] != null && response["task"] != null)
+                else if (response["audio_data"] != null)
                 {
-                    // Audio transcription response (STT)
+                    // Raw /audio/speech payloads are normalized to this envelope by CallApi.
+                    var speechAudio = OpenAICompatibleAudioCodec.TryDecodeAudioDataEnvelope(response);
+                    if (speechAudio != null)
+                    {
+                        var metrics = this.DecodeMetrics(response);
+                        if (string.IsNullOrEmpty(metrics.FinishReason))
+                        {
+                            metrics.FinishReason = "stop";
+                        }
+
+                        speechAudio.Metrics = metrics;
+                        interactions.Add(speechAudio);
+                    }
+
+                    return interactions;
+                }
+                else if (response["text"] != null && (response["task"] != null || response["choices"] == null))
+                {
+                    // Audio transcription response (STT); plain JSON responses carry text
+                    // without the verbose response's task field.
                     return this.ProcessAudioTranscriptionResponseData(response);
                 }
                 else if (response["output"] != null)
@@ -679,6 +757,11 @@ namespace SmartHopper.Providers.OpenAI
                 ["messages"] = messages,
             };
 
+            if (request.Capability.HasFlag(AICapability.AudioOutput))
+            {
+                OpenAICompatibleAudioCodec.ApplyAudioOutputParameters(requestBody, p?.Extras);
+            }
+
             // Configure tokens and parameters based on model family
             // - o-series (o1/o3/o4...) and gpt-5: use max_completion_tokens and reasoning_effort; omit temperature
             // - others: use max_tokens and temperature
@@ -791,7 +874,7 @@ namespace SmartHopper.Providers.OpenAI
             // Add tools if requested
             if (hasTools)
             {
-                var tools = this.GetFormattedTools(toolFilter);
+                var tools = this.GetFormattedTools(toolFilter, request.ToolSurface);
                 if (tools != null && tools.Count > 0)
                 {
                     requestBody["tools"] = tools;
@@ -930,7 +1013,7 @@ namespace SmartHopper.Providers.OpenAI
             // Add tools if requested
             if (hasTools)
             {
-                var tools = this.GetFormattedTools(toolFilter);
+                var tools = this.GetFormattedTools(toolFilter, request.ToolSurface);
                 if (tools != null && tools.Count > 0)
                 {
                     requestBody["tools"] = this.ConvertToolsToResponsesFormat(tools);
@@ -1106,6 +1189,17 @@ namespace SmartHopper.Providers.OpenAI
                 }
             }
 
+            if (requestPayload["language"] == null)
+            {
+                var audioLanguage = request.Body?.Interactions?
+                    .OfType<AIInteractionAudio>()
+                    .LastOrDefault()?.LanguageHint;
+                if (!string.IsNullOrWhiteSpace(audioLanguage))
+                {
+                    requestPayload["language"] = audioLanguage;
+                }
+            }
+
             Debug.WriteLine($"[OpenAI] AudioTranscription Request: {requestPayload}");
             return requestPayload.ToString();
         }
@@ -1181,30 +1275,7 @@ namespace SmartHopper.Providers.OpenAI
 
                 if (usage != null)
                 {
-                    // Support both Chat Completions API and Responses API token field names
-                    var totalPromptTokens = usage["prompt_tokens"]?.Value<int>()
-                        ?? usage["input_tokens"]?.Value<int>()
-                        ?? 0;
-
-                    // Extract cached tokens from nested details object
-                    var promptDetails = usage["prompt_tokens_details"] as JObject;
-                    var inputDetails = usage["input_tokens_details"] as JObject;
-                    metrics.InputTokensCached = promptDetails?["cached_tokens"]?.Value<int>()
-                        ?? inputDetails?["cached_tokens"]?.Value<int>()
-                        ?? 0;
-                    metrics.InputTokensPrompt = totalPromptTokens - metrics.InputTokensCached;
-
-                    metrics.OutputTokensGeneration = usage["completion_tokens"]?.Value<int>()
-                        ?? usage["output_tokens"]?.Value<int>()
-                        ?? metrics.OutputTokensGeneration;
-
-                    // Extract reasoning tokens from nested completion/output token details (o1/o3/GPT-5 models)
-                    var completionDetails = usage["completion_tokens_details"] as JObject;
-                    var outputDetails = usage["output_tokens_details"] as JObject;
-                    var reasoningTokens = completionDetails?["reasoning_tokens"]?.Value<int>()
-                        ?? outputDetails?["reasoning_tokens"]?.Value<int>()
-                        ?? 0;
-                    metrics.OutputTokensReasoning = reasoningTokens;
+                    OpenAIUsage.ApplyTo(metrics, usage);
                 }
 
                 // Handle finish reason for chat completions
@@ -1279,6 +1350,12 @@ namespace SmartHopper.Providers.OpenAI
                     content = contentToken.ToString();
                 }
 
+                var audioInteraction = OpenAICompatibleAudioCodec.ExtractAudioOutput(message, out var audioTranscript);
+                if (string.IsNullOrWhiteSpace(content) && !string.IsNullOrWhiteSpace(audioTranscript))
+                {
+                    content = audioTranscript;
+                }
+
                 // Implement schema unwrapping if needed
                 var wrapperInfo = JsonSchemaService.Instance.GetCurrentWrapperInfo();
                 if (wrapperInfo != null && wrapperInfo.IsWrapped)
@@ -1288,17 +1365,21 @@ namespace SmartHopper.Providers.OpenAI
                     Debug.WriteLine($"[OpenAI] Content after unwrapping: {content.Substring(0, Math.Min(100, content.Length))}...");
                 }
 
+                var metrics = this.DecodeMetrics(responseJson);
                 var interaction = new AIInteractionText();
                 interaction.SetResult(
                     agent: AIAgent.Assistant,
                     content: content,
                     reasoning: null);
-
-                var metrics = this.DecodeMetrics(responseJson);
-
                 interaction.Metrics = metrics;
 
                 interactions.Add(interaction);
+
+                if (audioInteraction != null)
+                {
+                    audioInteraction.Metrics = metrics;
+                    interactions.Add(audioInteraction);
+                }
 
                 // Add an AIInteractionToolCall for each tool call
                 if (message["tool_calls"] is JArray tcs && tcs.Count > 0)
@@ -1584,10 +1665,18 @@ namespace SmartHopper.Providers.OpenAI
                     return interactions;
                 }
 
-                var interaction = new AIInteractionText();
-                interaction.SetResult(
-                    agent: AIAgent.Assistant,
-                    content: text);
+                var metrics = this.DecodeMetrics(responseJson);
+                if (string.IsNullOrEmpty(metrics.FinishReason))
+                {
+                    metrics.FinishReason = "stop";
+                }
+
+                var interaction = new AIInteractionText
+                {
+                    Agent = AIAgent.Assistant,
+                    Content = text,
+                    Metrics = metrics,
+                };
 
                 interactions.Add(interaction);
 
@@ -1730,8 +1819,8 @@ namespace SmartHopper.Providers.OpenAI
                 bool hadReasoningOnlySegment = false; // Track if we emitted reasoning-only
                 bool responsesTextSegmentClosed = false;
                 string finalFinishReason = string.Empty;
-                int promptTokens = 0;
-                int completionTokens = 0;
+
+
 
                 // Provider-local aggregate of assistant text
                 var assistantAggregate = new AIInteractionText
@@ -1832,8 +1921,29 @@ namespace SmartHopper.Providers.OpenAI
                         continue;
                     }
 
+                    if (parsed["error"] is JObject streamError)
+                    {
+                        var failure = new AIReturn();
+                        failure.CreateProviderError(streamError.Value<string>("message") ?? "Provider streaming error", request);
+                        yield return failure;
+                        yield break;
+                    }
+
                     // --- Responses API streaming format ---
                     var eventType = parsed["type"]?.ToString();
+                    if (eventType == "response.failed" || eventType == "response.incomplete")
+                    {
+                        var failedResponse = parsed["response"] as JObject;
+                        var failure = new AIReturn();
+                        var detail = failedResponse?["error"]?.Value<string>("message")
+                            ?? failedResponse?["incomplete_details"]?.Value<string>("reason")
+                            ?? "Responses API stream did not complete successfully";
+                        failure.CreateProviderError(detail, request);
+                        OpenAIUsage.ApplyTo(failure.Body.GetLastInteraction().Metrics, failedResponse?["usage"] as JObject);
+                        yield return failure;
+                        yield break;
+                    }
+
                     if (!string.IsNullOrEmpty(eventType))
                     {
                         if (string.Equals(eventType, "response.output_text.delta", StringComparison.OrdinalIgnoreCase))
@@ -2022,17 +2132,7 @@ namespace SmartHopper.Providers.OpenAI
                             var respUsage = responseObj?["usage"] as JObject;
                             if (respUsage != null)
                             {
-                                var pt = respUsage["input_tokens"]?.Value<int?>();
-                                var ct = respUsage["output_tokens"]?.Value<int?>();
-                                if (pt.HasValue) promptTokens = pt.Value;
-                                if (ct.HasValue) completionTokens = ct.Value;
-                                assistantAggregate.AppendDelta(metricsDelta: new AIMetrics
-                                {
-                                    Provider = this.Provider.Name,
-                                    Model = request.Model,
-                                    InputTokensPrompt = pt ?? 0,
-                                    OutputTokensGeneration = ct ?? 0,
-                                });
+                                OpenAIUsage.ApplyTo(assistantAggregate.Metrics, respUsage);
                             }
 
                             finalFinishReason = "stop";
@@ -2210,34 +2310,8 @@ namespace SmartHopper.Providers.OpenAI
                     bool hasFinish = !string.IsNullOrEmpty(finishReason);
                     if (hasFinish) finalFinishReason = finishReason;
 
-                    // Usage metrics (only present in final chunk when include_usage=true)
-                    var usage = parsed["usage"] as JObject;
-                    if (usage != null)
-                    {
-                        var pt = usage["prompt_tokens"]?.Value<int?>();
-                        var ct = usage["completion_tokens"]?.Value<int?>();
-                        if (pt.HasValue) promptTokens = pt.Value;
-                        if (ct.HasValue) completionTokens = ct.Value;
-
-                        // Extract cached tokens from nested prompt_tokens_details object
-                        var promptDetails = usage["prompt_tokens_details"] as JObject;
-                        var cachedTokens = promptDetails?["cached_tokens"]?.Value<int>() ?? 0;
-
-                        // Extract reasoning tokens from nested completion_tokens_details object (o1/o3/GPT-5 models)
-                        var completionDetails = usage["completion_tokens_details"] as JObject;
-                        var rt = completionDetails?["reasoning_tokens"]?.Value<int?>() ?? 0;
-
-                        // Update aggregate metrics
-                        assistantAggregate.AppendDelta(metricsDelta: new AIMetrics
-                        {
-                            Provider = this.Provider.Name,
-                            Model = request.Model,
-                            InputTokensCached = cachedTokens,
-                            InputTokensPrompt = (pt ?? 0) - cachedTokens,
-                            OutputTokensGeneration = ct ?? 0,
-                            OutputTokensReasoning = rt,
-                        });
-                    }
+                    // Usage is a cumulative snapshot, not a delta.
+                    OpenAIUsage.ApplyTo(assistantAggregate.Metrics, parsed["usage"] as JObject);
 
                     // Content streaming - handle both plain strings and structured content arrays
                     var contentToken = delta?["content"];
@@ -2457,8 +2531,10 @@ namespace SmartHopper.Providers.OpenAI
                     Provider = this.Provider.Name,
                     Model = request.Model,
                     FinishReason = string.IsNullOrEmpty(finalFinishReason) ? "stop" : finalFinishReason,
-                    InputTokensPrompt = promptTokens,
-                    OutputTokensGeneration = completionTokens,
+                    InputTokensPrompt = assistantAggregate.Metrics.InputTokensPrompt,
+                    InputTokensCached = assistantAggregate.Metrics.InputTokensCached,
+                    OutputTokensReasoning = assistantAggregate.Metrics.OutputTokensReasoning,
+                    OutputTokensGeneration = assistantAggregate.Metrics.OutputTokensGeneration,
                 };
 
                 // Align aggregate metrics finish reason as well

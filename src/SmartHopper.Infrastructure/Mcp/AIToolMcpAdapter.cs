@@ -27,6 +27,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using SmartHopper.Infrastructure.AICall.Core.Returns;
@@ -108,7 +109,11 @@ namespace SmartHopper.Infrastructure.Mcp
         /// </summary>
         /// <param name="toolName">Tool name.</param>
         /// <param name="arguments">JSON object containing tool arguments.</param>
-        public async Task<McpToolCallResult> ExecuteAsync(string toolName, JObject? arguments)
+        /// <param name="cancellationToken">Token forwarded to the tool execution pipeline.</param>
+        public async Task<McpToolCallResult> ExecuteAsync(
+            string toolName,
+            JObject? arguments,
+            CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(toolName))
             {
@@ -123,10 +128,11 @@ namespace SmartHopper.Infrastructure.Mcp
             var result = await this.executor.ExecuteAsync(
                 toolName,
                 arguments,
-                this.CreateCatalogOptions()).ConfigureAwait(false);
+                this.CreateCatalogOptions(),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
             return result.IsError
                 ? McpToolCallResult.Error(result.ErrorMessage ?? $"Tool '{toolName}' failed")
-                : McpToolCallResult.Ok(result.Payload);
+                : McpToolCallResult.Ok(result.Payload, result.Images);
         }
 
         private AIToolExternalCatalogOptions CreateCatalogOptions()

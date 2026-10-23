@@ -134,6 +134,8 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
     /// </summary>
     public sealed class CodexDynamicToolResult
     {
+        public System.Collections.Generic.IReadOnlyList<SmartHopper.Infrastructure.AICall.Core.Interactions.ToolResultImage> Images { get; init; }
+            = System.Array.Empty<SmartHopper.Infrastructure.AICall.Core.Interactions.ToolResultImage>();
         public bool Success { get; init; }
 
         public JObject Payload { get; init; } = new ();
@@ -148,7 +150,7 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
                 {
                     ["error"] = this.ErrorMessage ?? "Canvas 도구 실행에 실패했습니다.",
                 };
-            return new JObject
+            var response = new JObject
             {
                 ["success"] = this.Success,
                 ["contentItems"] = new JArray
@@ -160,14 +162,24 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
                     },
                 },
             };
+            if (this.Success)
+            {
+                foreach (var image in this.Images)
+                {
+                    if (image.SendToModel && SmartHopper.Infrastructure.AICall.Utilities.ToolResultMediaExtractor.IsSafeImage(image))
+                        ((JArray)response["contentItems"]).Add(new JObject { ["type"] = "inputImage", ["imageUrl"] = $"data:{image.MimeType};base64,{image.ImageData}" });
+                }
+            }
+            return response;
         }
 
-        public static CodexDynamicToolResult Ok(JObject payload)
+        public static CodexDynamicToolResult Ok(JObject payload, System.Collections.Generic.IReadOnlyList<SmartHopper.Infrastructure.AICall.Core.Interactions.ToolResultImage>? images = null)
         {
             return new CodexDynamicToolResult
             {
                 Success = true,
                 Payload = payload != null ? (JObject)payload.DeepClone() : new JObject(),
+                Images = images ?? System.Array.Empty<SmartHopper.Infrastructure.AICall.Core.Interactions.ToolResultImage>(),
             };
         }
 

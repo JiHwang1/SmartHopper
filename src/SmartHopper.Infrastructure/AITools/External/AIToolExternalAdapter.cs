@@ -45,6 +45,10 @@ namespace SmartHopper.Infrastructure.AITools.External
         public bool ExcludeDestructiveTools { get; init; }
 
         public Func<AITool, bool>? AdditionalFilter { get; init; }
+
+        public AIToolSurface Surface { get; init; } = AIToolSurface.Mcp;
+
+        public SmartHopper.Infrastructure.Consent.MutationInvocationContext? InvocationContext { get; init; }
     }
 
     /// <summary>
@@ -110,6 +114,7 @@ namespace SmartHopper.Infrastructure.AITools.External
                 : new HashSet<string>(options.EnabledTools, StringComparer.OrdinalIgnoreCase);
             var hasAllowList = enabledTools != null && enabledTools.Count > 0;
             var exposedTools = tools
+                .Where(tool => tool.Advertise)
                 .Where(tool => this.IsExposed(tool, tool.Name, options, enabledTools, hasAllowList))
                 .ToList();
 
@@ -147,7 +152,7 @@ namespace SmartHopper.Infrastructure.AITools.External
 
         private bool IsExposed(AITool tool, string toolName, AIToolExternalCatalogOptions options, HashSet<string>? enabledTools, bool hasAllowList)
         {
-            if (!tool.Enabled)
+            if (!tool.Enabled || (tool.Surfaces & options.Surface) == 0)
             {
                 return false;
             }
@@ -259,9 +264,11 @@ namespace SmartHopper.Infrastructure.AITools.External
 
         public string? ErrorMessage { get; }
 
-        public static AIToolExternalResult Ok(JObject payload)
+        public IReadOnlyList<ToolResultImage> Images { get; init; } = Array.Empty<ToolResultImage>();
+
+        public static AIToolExternalResult Ok(JObject payload, IReadOnlyList<ToolResultImage>? images = null)
         {
-            return new AIToolExternalResult(false, payload, null);
+            return new AIToolExternalResult(false, payload, null) { Images = images ?? Array.Empty<ToolResultImage>() };
         }
 
         public static AIToolExternalResult Error(string message)
@@ -287,7 +294,7 @@ namespace SmartHopper.Infrastructure.AITools.External
                 .LastOrDefault();
             if (lastToolResult?.Result != null)
             {
-                return AIToolExternalResult.Ok((JObject)lastToolResult.Result.DeepClone());
+                return AIToolExternalResult.Ok((JObject)lastToolResult.Result.DeepClone(), lastToolResult.Images);
             }
 
             var firstError = result.Messages?
@@ -351,6 +358,8 @@ namespace SmartHopper.Infrastructure.AITools.External
             {
                 CancellationToken = cancellationToken,
                 SkipMetricsValidation = true,
+                Surface = options.Surface,
+                InvocationContext = options.InvocationContext?.ForTool(interaction.Id, toolName),
             };
             toolCall.FromToolCallInteraction(interaction);
 

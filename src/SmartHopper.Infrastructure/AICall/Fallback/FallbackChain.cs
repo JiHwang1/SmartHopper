@@ -17,6 +17,7 @@
  */
 
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using SmartHopper.Infrastructure.AICall.Core.Interactions;
@@ -26,7 +27,8 @@ namespace SmartHopper.Infrastructure.AICall.Fallback
 {
     /// <summary>
     /// An ordered list of fallback steps that convert unsupported modalities
-    /// into supported ones. For v1, chains are always single-step.
+    /// into supported ones. Each step carries its own resolved provider and
+    /// model, so one chain may span providers.
     /// </summary>
     public sealed class FallbackChain
     {
@@ -34,31 +36,50 @@ namespace SmartHopper.Infrastructure.AICall.Fallback
         /// Initializes a new instance of the <see cref="FallbackChain"/> class.
         /// </summary>
         public FallbackChain(
+            IReadOnlyList<FallbackStep> steps,
+            string description,
+            AICapability effectiveCapability)
+        {
+            this.BoundSteps = steps.ToArray();
+            this.Steps = this.BoundSteps.Select(step => step.Fallback).ToArray();
+            this.Description = description;
+            this.EffectiveCapability = effectiveCapability;
+        }
+
+        /// <summary>
+        /// Compatibility constructor for callers that resolve all steps to one
+        /// provider/model.
+        /// </summary>
+        public FallbackChain(
             IReadOnlyList<IModalityFallback> steps,
             string description,
             string actualProvider,
             string actualModel,
             AICapability effectiveCapability)
+            : this(ToBoundSteps(steps, actualProvider, actualModel), description, effectiveCapability)
         {
-            this.Steps = steps;
-            this.Description = description;
-            this.ActualProvider = actualProvider;
-            this.ActualModel = actualModel;
-            this.EffectiveCapability = effectiveCapability;
         }
 
-        /// <summary>Ordered fallback steps.</summary>
+        /// <summary>Gets the ordered fallback steps.</summary>
         public IReadOnlyList<IModalityFallback> Steps { get; }
+
+        /// <summary>Gets the ordered steps with their resolved provider and model.</summary>
+        public IReadOnlyList<FallbackStep> BoundSteps { get; }
 
         /// <summary>Joined step descriptions for the warning message.</summary>
         public string Description { get; }
 
-        /// <summary>Provider executing the fallback call(s). Equals the component's
-        /// configured provider unless mode is AnyProvider and a different one was chosen.</summary>
-        public string ActualProvider { get; }
+        /// <summary>
+        /// Gets the compatibility provider value for a single-provider chain.
+        /// Mixed-provider chains expose the provider of their first step.
+        /// </summary>
+        public string ActualProvider => this.BoundSteps.Count > 0 ? this.BoundSteps[0].Provider : null;
 
-        /// <summary>Model executing the fallback (resolved, never null when chain is non-null).</summary>
-        public string ActualModel { get; }
+        /// <summary>
+        /// Gets the compatibility model value for a single-provider chain.
+        /// Mixed-provider chains expose the model of their first step.
+        /// </summary>
+        public string ActualModel => this.BoundSteps.Count > 0 ? this.BoundSteps[0].Model : null;
 
         /// <summary>True when a different provider from the component's configured one is used.</summary>
         public bool UsesAltProvider { get; init; }
@@ -67,18 +88,18 @@ namespace SmartHopper.Infrastructure.AICall.Fallback
         public AICapability EffectiveCapability { get; }
 
         /// <summary>
-        /// Applies all steps in order, transforming the body and collecting metrics.
+        /// Applies all steps in order on their resolved provider/model.
         /// </summary>
         public async Task<ModalityFallbackResult> ApplyAsync(AIBody body, CancellationToken ct)
         {
             var combinedResult = new ModalityFallbackResult { TransformedBody = body };
 
-            foreach (var step in this.Steps)
+            foreach (var step in this.BoundSteps)
             {
-                var stepResult = await step.ApplyAsync(
+                var stepResult = await step.Fallback.ApplyAsync(
                     combinedResult.TransformedBody,
-                    this.ActualProvider,
-                    this.ActualModel,
+                    step.Provider,
+                    step.Model,
                     ct).ConfigureAwait(false);
 
                 combinedResult.TransformedBody = stepResult.TransformedBody;
@@ -87,6 +108,23 @@ namespace SmartHopper.Infrastructure.AICall.Fallback
             }
 
             return combinedResult;
+        }
+
+        private static IReadOnlyList<FallbackStep> ToBoundSteps(
+            IReadOnlyList<IModalityFallback> steps,
+            string provider,
+            string model)
+        {
+            var bound = new List<FallbackStep>();
+            if (steps != null)
+            {
+                foreach (var step in steps)
+                {
+                    bound.Add(new FallbackStep(step, provider, model));
+                }
+            }
+
+            return bound;
         }
     }
 }

@@ -73,7 +73,11 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
         /// <summary>
         /// The cancellation token source for this session.
         /// </summary>
-        private readonly CancellationTokenSource cts = new ();
+        private CancellationTokenSource? activeRunCancellation;
+
+        private readonly SemaphoreSlim runGate = new (1, 1);
+        private RunBudget? runBudget;
+        private SmartHopper.Infrastructure.Consent.MutationInvocationContext? invocationContext;
 
         /// <summary>
         /// Executor abstraction for provider and tool calls.
@@ -168,9 +172,22 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
             bool yieldDeltas,
             [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
-            var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(this.cts.Token, options.CancellationToken, cancellationToken);
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(options.CancellationToken, cancellationToken);
+            await this.runGate.WaitAsync(linkedCts.Token).ConfigureAwait(false);
+            var originalToolFilter = this.Request.Body.ToolFilter;
             try
             {
+                this.activeRunCancellation = linkedCts;
+                this.runBudget = new RunBudget(options.MaxRunSeconds, options.MaxRunTokens);
+                this.invocationContext = options.InvocationContext;
+                this.Request.ToolSurface = options.InvocationContext?.Surface ?? SmartHopper.Infrastructure.AITools.AIToolSurface.Direct;
+                if (options.MaxRunSeconds > 0) linkedCts.CancelAfter(TimeSpan.FromSeconds(options.MaxRunSeconds));
+                this.ReconcilePendingToolCalls("Tool call was abandoned before execution completed.");
+                if (!options.ProcessTools)
+                {
+                    this.Request.Body = this.Request.Body with { ToolFilter = "-*" };
+                }
+
                 this.NotifyStart(this.Request);
 
                 // Generate greeting if requested before starting conversation
@@ -349,8 +366,7 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
                     try
                     {
                         // Try to obtain a streaming adapter and stream deltas inline
-                        var exec = new DefaultProviderExecutor();
-                        var adapter = exec.TryGetStreamingAdapter(this.Request);
+                        var adapter = this.executor.TryGetStreamingAdapter(this.Request);
 
                         if (adapter == null)
                         {
@@ -513,7 +529,18 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
             }
             finally
             {
-                linkedCts.Dispose();
+                // Also runs when an async stream is disposed before its final yield.
+                this.ReconcilePendingToolCalls("Tool call was abandoned when the run ended.");
+                if (!options.ProcessTools)
+                {
+                    this.Request.Body = this.Request.Body with { ToolFilter = originalToolFilter };
+                    this._lastReturn.SetBody(this._lastReturn.Body with { ToolFilter = originalToolFilter });
+                }
+
+                this.runBudget = null;
+                this.invocationContext = null;
+                this.activeRunCancellation = null;
+                this.runGate.Release();
             }
         }
 
@@ -557,6 +584,7 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
                 // Append generic interaction to session history without marking it as 'new'
                 this.AppendToSessionHistory(interaction);
                 this.UpdateLastReturn();
+                this.Observer?.OnInteractionCompleted(interaction);
             }
         }
 
@@ -700,13 +728,16 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
         private async Task<AIReturn?> ExecProviderAsync(CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
+            this.runBudget?.ThrowIfExhausted();
 
             var stopwatch = Stopwatch.StartNew();
-            var res = await this.Request.Exec(stream: false).ConfigureAwait(false);
+            var res = await this.Request.Exec(stream: false, cancellationToken: ct).ConfigureAwait(false);
+            this.runBudget?.ChargeResult(res);
             stopwatch.Stop();
 
             // Attach completion time to the last interaction in the result
-            if (res?.Body != null)
+            if (res?.Body != null && (res.Metrics.HasProviderCallEvidence
+                || res.Body.Interactions.Any(i => i.Agent == AIAgent.Assistant || i.Agent == AIAgent.ToolCall)))
             {
                 var lastInteraction = res.Body.GetLastInteraction();
                 if (lastInteraction?.Metrics != null)
@@ -769,6 +800,7 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
             CancellationToken ct)
         {
             var result = new StreamProcessingResult();
+            this.runBudget?.ThrowIfExhausted();
             var stopwatch = Stopwatch.StartNew();
 
             try
@@ -787,6 +819,16 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
 
                     // Normalize delta to handle provider-specific formats
                     var delta = adapter.NormalizeDelta(rawDelta);
+
+                    var failure = delta.Body?.Interactions.OfType<AIInteractionRuntimeMessage>()
+                        .FirstOrDefault(d => d.Severity == SHRuntimeMessageSeverity.Error);
+                    if (failure != null)
+                    {
+                        result.HasError = true;
+                        result.ErrorMessage = failure.Content;
+                        result.LastDelta = delta;
+                        break;
+                    }
 
                     var newInteractions = delta.Body?.GetNewInteractions();
                     InteractionUtility.EnsureTurnId(newInteractions, turnId);
@@ -867,6 +909,7 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
             {
                 stopwatch.Stop();
                 result.ElapsedSeconds = stopwatch.Elapsed.TotalSeconds;
+                this.runBudget?.ChargeResult(result.LastDelta);
             }
 
             // Check if streaming produced no results
@@ -895,6 +938,7 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
             while (toolPass < options.MaxToolPasses)
             {
                 ct.ThrowIfCancellationRequested();
+                this.runBudget?.ThrowIfExhausted();
 #if DEBUG
                 // Debug: snapshot of tool_call ids before each tool pass
                 this.DebugLogToolCallIds($"before tool pass {toolPass} turn {turnId}");
@@ -931,8 +975,7 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
                 // Use streaming if requested and available
                 if (useStreaming && streamingOptions != null)
                 {
-                    var exec = new DefaultProviderExecutor();
-                    var adapter = exec.TryGetStreamingAdapter(this.Request);
+                    var adapter = this.executor.TryGetStreamingAdapter(this.Request);
 
                     if (adapter != null)
                     {
@@ -980,16 +1023,20 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
                 }
             }
 
+            if (this.ReconcilePendingToolCalls($"Tool execution was skipped after reaching the tool pass limit ({options.MaxToolPasses}).") > 0)
+            {
+                this.UpdateLastReturn();
+                preparedYields.Add(this.GetHistoryReturn());
+            }
+
             return preparedYields;
         }
 
         /// <inheritdoc/>
         public void Cancel()
         {
-            if (!this.cts.IsCancellationRequested)
-            {
-                this.cts.Cancel();
-            }
+            try { this.activeRunCancellation?.Cancel(); }
+            catch (ObjectDisposedException) { /* The run ended concurrently. */ }
 
 #if DEBUG
             try { this.DebugAppendEvent("Cancel requested"); } catch { }
@@ -1005,6 +1052,11 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
                 last = ret;
             }
 
+            if (last != null && !options.ProcessTools)
+            {
+                last.SetBody(last.Body with { ToolFilter = this.Request.Body.ToolFilter });
+            }
+
             return last ?? this.CreateError("No result");
         }
 
@@ -1014,8 +1066,14 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
             StreamingOptions streamingOptions,
             [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
+            var originalToolFilter = this.Request.Body.ToolFilter;
             await foreach (var ret in this.TurnLoopAsync(options, streamingOptions, yieldDeltas: true, cancellationToken).ConfigureAwait(false))
             {
+                if (!options.ProcessTools)
+                {
+                    ret.SetBody(ret.Body with { ToolFilter = originalToolFilter });
+                }
+
                 yield return ret;
             }
         }

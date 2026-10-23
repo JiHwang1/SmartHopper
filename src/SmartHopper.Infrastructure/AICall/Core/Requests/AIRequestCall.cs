@@ -43,6 +43,8 @@ namespace SmartHopper.Infrastructure.AICall.Core.Requests
     /// </summary>
     public class AIRequestCall : AIRequestBase
     {
+        /// <summary>Gets or sets the host surface used to filter tool declarations.</summary>
+        public SmartHopper.Infrastructure.AITools.AIToolSurface ToolSurface { get; set; } = SmartHopper.Infrastructure.AITools.AIToolSurface.Direct;
         private AICapability capability = AICapability.Text2Text;
 
         /// <inheritdoc/>
@@ -125,7 +127,7 @@ namespace SmartHopper.Infrastructure.AICall.Core.Requests
                     messages.Add(new SHRuntimeMessage(
                         effectiveMode == ProviderIntegrityCheckMode.Soft ? SHRuntimeMessageSeverity.Warning : SHRuntimeMessageSeverity.Error,
                         SHRuntimeMessageOrigin.Validation,
-                        SHMessageCode.UnknownProvider,
+                        SHMessageCode.ProviderTrustWarning,
                         integrityMessage));
                     Debug.WriteLine($"[AIRequestCall] Provider '{this.Provider}' is unverified - adding warning");
                 }
@@ -139,7 +141,7 @@ namespace SmartHopper.Infrastructure.AICall.Core.Requests
                     messages.Add(new SHRuntimeMessage(
                         effectiveMode == ProviderIntegrityCheckMode.Strict ? SHRuntimeMessageSeverity.Error : SHRuntimeMessageSeverity.Warning,
                         SHRuntimeMessageOrigin.Validation,
-                        SHMessageCode.UnknownProvider,
+                        SHMessageCode.ProviderTrustWarning,
                         unavailableMessage));
                     Debug.WriteLine($"[AIRequestCall] Provider '{this.Provider}' hash verification unavailable - adding warning");
                 }
@@ -154,7 +156,7 @@ namespace SmartHopper.Infrastructure.AICall.Core.Requests
                     messages.Add(new SHRuntimeMessage(
                         effectiveMode == ProviderIntegrityCheckMode.Soft ? SHRuntimeMessageSeverity.Warning : SHRuntimeMessageSeverity.Error,
                         SHRuntimeMessageOrigin.Validation,
-                        SHMessageCode.UnknownProvider,
+                        SHMessageCode.ProviderTrustWarning,
                         unknownMessage));
                     Debug.WriteLine($"[AIRequestCall] Provider '{this.Provider}' is unknown - adding warning");
                 }

@@ -30,6 +30,15 @@ namespace SmartHopper.Infrastructure.AICall.Metrics
     public class AIMetrics
     {
         /// <summary>
+        /// Whether these metrics contain provider-call evidence rather than only routing metadata.
+        /// Local tool execution must not populate completion time or finish reason.
+        /// </summary>
+        [JsonIgnore]
+        public bool HasProviderCallEvidence => !string.IsNullOrWhiteSpace(this.FinishReason)
+            || this.InputTokens > 0 || this.OutputTokens > 0
+            || this.TotalEstimatedTokens > 0 || this.CompletionTime > 0;
+
+        /// <summary>
         /// Optional human-readable label for this metrics entry, e.g.
         /// "main", "fallback:ImageToText", "tool:img2text".
         /// Null for the primary call (serialized as absent, not null).

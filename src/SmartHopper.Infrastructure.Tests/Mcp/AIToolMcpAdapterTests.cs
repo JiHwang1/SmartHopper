@@ -158,6 +158,43 @@ namespace SmartHopper.Infrastructure.Tests.Mcp
         }
 
         [Fact]
+        public async Task BuildDescriptors_HidesCompatibilityAliasWhileKeepingItExecutable()
+        {
+            var catalog = new Dictionary<string, AITool>
+            {
+                ["gh_get"] = CreateTool("gh_get", advertise: true),
+                ["gh_get_legacy"] = CreateTool("gh_get_legacy", advertise: false),
+            };
+            var adapter = new AIToolMcpAdapter(
+                new McpServerOptions(),
+                () => catalog,
+                call =>
+                {
+                    var response = new AIReturn
+                    {
+                        Request = call,
+                        SkipRequestValidation = true,
+                        SkipMetricsValidation = true,
+                    };
+                    response.SetBody(AIBody.Empty.WithAppended(new AIInteractionToolResult
+                    {
+                        Name = call.GetToolCall().Name,
+                        Result = new JObject { ["ok"] = true },
+                    }));
+                    return Task.FromResult(response);
+                });
+
+            var descriptors = adapter.BuildDescriptors();
+
+            Assert.Single(descriptors);
+            Assert.Equal("gh_get", descriptors[0].Name);
+            Assert.True(adapter.IsExposed("gh_get_legacy"));
+            var result = await adapter.ExecuteAsync("gh_get_legacy", new JObject());
+            Assert.False(result.IsError);
+            Assert.True((bool?)result.Payload["ok"]);
+        }
+
+        [Fact]
         public async Task ExecuteAsync_ReturnsErrorWhenToolHidden()
         {
             var tools = BuildCatalog(("gh_put", ReadOnlySchema, true));
@@ -319,6 +356,18 @@ namespace SmartHopper.Infrastructure.Tests.Mcp
             }
 
             return dict;
+        }
+
+        private static AITool CreateTool(string name, bool advertise)
+        {
+            return new AITool(
+                name: name,
+                description: $"Test tool {name}",
+                category: "Test",
+                parametersSchema: ReadOnlySchema,
+                execute: _ => Task.FromResult(new AIReturn()),
+                mutatesCanvas: false,
+                advertise: advertise);
         }
     }
 }

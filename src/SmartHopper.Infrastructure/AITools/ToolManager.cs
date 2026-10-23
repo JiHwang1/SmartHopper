@@ -165,12 +165,22 @@ namespace SmartHopper.Infrastructure.AITools
 
             try
             {
+                if ((tool.Surfaces & toolCall.Surface) == 0 || toolCall.Surface == AIToolSurface.None)
+                {
+                    output.CreateToolError($"Tool '{toolInfo.Name}' is unavailable on this execution surface.", toolCall);
+                    return output;
+                }
                 // Execute the tool
                 Debug.WriteLine($"[AIToolManager] Tool found, executing: {toolInfo.Name}");
 
                 // Extract cancellation token if available on the toolCall
                 var cancellationToken = toolCall.CancellationToken;
                 cancellationToken.ThrowIfCancellationRequested();
+                if (tool.MutatesCanvas && toolCall.InvocationContext?.ValidateMutationAsync != null)
+                {
+                    var error = await toolCall.InvocationContext.ValidateMutationAsync(cancellationToken).ConfigureAwait(false);
+                    if (error != null) { output.CreateToolError(error, toolCall); return output; }
+                }
 
                 var result = await tool.Execute(toolCall).ConfigureAwait(false);
                 Debug.WriteLine($"[AIToolManager] Tool execution complete: {toolInfo.Name}");

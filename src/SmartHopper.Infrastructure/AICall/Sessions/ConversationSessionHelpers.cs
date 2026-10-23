@@ -140,11 +140,38 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
         }
 
         /// <summary>
-        /// Drains any pending tool calls before a provider turn begins.
+        /// Closes abandoned calls without executing them. Recovery must never replay a mutation.
         /// </summary>
-        private async Task<List<AIReturn>> ResolvePendingToolsAsync(SessionOptions options, string turnId, CancellationToken ct)
+        private int ReconcilePendingToolCalls(string reason)
         {
-            return await this.ProcessPendingToolsAsync(options, turnId, ct).ConfigureAwait(false);
+            var pending = this.Request.Body.PendingToolCallsList();
+            foreach (var call in pending)
+            {
+                if (string.IsNullOrWhiteSpace(call.TurnId))
+                {
+                    call.TurnId = InteractionUtility.GenerateTurnId();
+                }
+
+                this.PersistToolResult(new AIInteractionToolResult
+                {
+                    Id = call.Id,
+                    Name = call.Name,
+                    TurnId = call.TurnId,
+                    Result = new JObject
+                    {
+                        ["success"] = false,
+                        ["cancelled"] = true,
+                        ["messages"] = new JArray(reason),
+                    },
+                }, call.TurnId, recovering: true);
+            }
+
+            if (pending.Count > 0)
+            {
+                this.UpdateLastReturn();
+            }
+
+            return pending.Count;
         }
 
         /// <summary>
@@ -155,7 +182,12 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
         {
             var providerReturn = await this.HandleProviderTurnAsync(options, turnId, ct).ConfigureAwait(false);
 
-            if (options.ProcessTools)
+            if (providerReturn.Body.Interactions.OfType<AIInteractionRuntimeMessage>()
+                .Any(d => d.Severity == SHRuntimeMessageSeverity.Error))
+            {
+                this.ReconcilePendingToolCalls("Tool execution was abandoned after a provider error.");
+            }
+            else if (options.ProcessTools)
             {
                 var afterTools = await this.ProcessPendingToolsAsync(options, turnId, ct).ConfigureAwait(false);
                 if (afterTools != null && afterTools.Count > 0)
@@ -173,6 +205,7 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
         /// </summary>
         private async Task<AIReturn> ExecuteSingleToolAsync(AIInteractionToolCall tc, string turnId, CancellationToken ct)
         {
+            this.runBudget?.ThrowIfExhausted();
             this.NotifyToolCall(tc);
 
             // Persist the tool_call into session history to maintain correct ordering
@@ -208,11 +241,11 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
             var toolRq = new AIToolCall();
             toolRq.FromToolCallInteraction(tc, this.Request.Provider, this.Request.Model);
             toolRq.CancellationToken = ct;
+            toolRq.InvocationContext = this.invocationContext?.ForTool(tc.Id, tc.Name);
+            toolRq.Surface = this.Request.ToolSurface;
 
-            // Measure tool execution time
-            var stopwatch = Stopwatch.StartNew();
             var toolRet = await this.executor.ExecToolAsync(toolRq, ct).ConfigureAwait(false);
-            stopwatch.Stop();
+            this.runBudget?.ChargeResult(toolRet);
 
             var toolInteraction = toolRet?.Body?.GetLastInteraction() as AIInteractionToolResult;
             if (toolInteraction == null)
@@ -247,24 +280,10 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
 
             this.PersistToolResult(toolInteraction, turnId);
 
-            // Attach tool metrics and completion time to the tool result interaction
-            if (toolRet?.Metrics != null)
+            // Local execution time is not evidence of a provider call. Preserve inner AI usage only.
+            if (toolRet?.Metrics != null && toolRet.Metrics.HasProviderCallEvidence)
             {
                 toolInteraction.Metrics = toolRet.Metrics;
-
-                // Override with actual measured time (includes tool execution + any overhead)
-                toolInteraction.Metrics.CompletionTime = stopwatch.Elapsed.TotalSeconds;
-            }
-            else if (toolInteraction.Metrics == null)
-            {
-                // Create metrics with at least the completion time
-                toolInteraction.Metrics = new AIMetrics
-                {
-                    CompletionTime = stopwatch.Elapsed.TotalSeconds,
-                    Provider = this.Request.Provider,
-                    Model = this.Request.Model,
-                    FinishReason = "stop", // Tool completed normally
-                };
             }
 
             var deltaOk = new AIReturn();
@@ -280,11 +299,31 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
         /// <summary>
         /// Persists a tool result to history and notifies observers.
         /// </summary>
-        private void PersistToolResult(AIInteractionToolResult result, string turnId)
+        private void PersistToolResult(AIInteractionToolResult result, string turnId, bool recovering = false)
         {
             // TurnId should already be set by ExecuteSingleToolAsync to match the tool call's TurnId
             // Do not override it here to maintain correct message ordering
-            this.AppendToSessionHistory(result);
+            if (recovering)
+            {
+                var body = this.Request.Body;
+                var interactions = body.Interactions.ToList();
+                var index = interactions.FindIndex(i => i is AIInteractionToolCall call && call.Id == result.Id) + 1;
+                // Complete the original tool block before a later user/assistant message.
+                while (index < interactions.Count && (interactions[index] is AIInteractionToolCall
+                    || interactions[index] is AIInteractionToolResult || interactions[index] is AIInteractionRuntimeMessage))
+                {
+                    index++;
+                }
+
+                interactions.Insert(index, result);
+                var markers = body.InteractionsNew.Select(i => i >= index ? i + 1 : i).ToList();
+                markers.Add(index);
+                this.Request.Body = body with { Interactions = interactions, InteractionsNew = markers };
+            }
+            else
+            {
+                this.AppendToSessionHistory(result);
+            }
             this.NotifyToolResult(result);
             try
             {
@@ -868,6 +907,9 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
         /// <returns>The error AIReturn.</returns>
         private AIReturn HandleAndNotifyError(Exception ex)
         {
+            this.ReconcilePendingToolCalls(ex is OperationCanceledException
+                ? "Tool execution was cancelled before completion."
+                : $"Tool execution was aborted by an error: {ex.Message}");
             var errorMessage = ex is OperationCanceledException
                 ? "Call cancelled or timed out"
                 : ex.Message;

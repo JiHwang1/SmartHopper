@@ -78,7 +78,8 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
                 // - session cancel token (this.cts.Token)
                 // - external token passed to this method
                 // - timeout via CancelAfter
-                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(this.cts.Token, cancellationToken);
+                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(this.activeRunCancellation?.Token ?? CancellationToken.None, cancellationToken);
+                this.runBudget?.ThrowIfExhausted();
                 if (config.TimeoutMs.HasValue)
                 {
                     linkedCts.CancelAfter(config.TimeoutMs.Value);
@@ -96,6 +97,7 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
                 }
 
                 // Apply persistence strategy to main conversation (this is where observers get notified)
+                this.runBudget?.ChargeResult(result);
                 this.ApplyPersistenceStrategy(config, snapshot, result, turnId);
 
                 Debug.WriteLine($"[ConversationSession.SpecialTurn] Completed special turn: type={config.TurnType}, turnId={turnId}, success={result?.Status == AICallStatus.Finished}");
@@ -128,7 +130,7 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
         {
             // Execute on isolated request (no observer notifications)
             ct.ThrowIfCancellationRequested();
-            var result = await specialRequest.Exec(stream: false).ConfigureAwait(false);
+            var result = await specialRequest.Exec(stream: false, cancellationToken: ct).ConfigureAwait(false);
 
             if (result == null)
             {
@@ -295,6 +297,7 @@ namespace SmartHopper.Infrastructure.AICall.Sessions
             specialRequest.Model = config.OverrideModel ?? this.Request.Model;
             specialRequest.Endpoint = config.OverrideEndpoint ?? this.Request.Endpoint;
             specialRequest.Capability = config.OverrideCapability ?? this.Request.Capability;
+            specialRequest.ToolSurface = this.Request.ToolSurface;
 
             Debug.WriteLine($"[ConversationSession.SpecialTurn] Created isolated request: provider={specialRequest.Provider}, model={specialRequest.Model}");
             return specialRequest;
