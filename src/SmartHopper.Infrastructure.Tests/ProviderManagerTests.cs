@@ -18,6 +18,7 @@
 
 namespace SmartHopper.Infrastructure.Tests
 {
+    using System.Collections.Generic;
     using SmartHopper.Infrastructure.AIProviders;
     using Xunit;
 
@@ -57,6 +58,29 @@ namespace SmartHopper.Infrastructure.Tests
         {
             var mgr = ProviderManager.Instance;
             Assert.Null(mgr.GetProvider("nonexistent"));
+        }
+
+#if NET7_WINDOWS
+        [Theory(DisplayName = "ShouldShowProviderStartupDialog_RespectsExplicitTrust [Windows]")]
+#else
+        [Theory(DisplayName = "ShouldShowProviderStartupDialog_RespectsExplicitTrust [Core]")]
+#endif
+        [InlineData(null, true)]
+        [InlineData(false, false)]
+        [InlineData(true, true)]
+        public void ShouldShowProviderStartupDialog_RespectsExplicitTrust(bool? isEnabled, bool expected)
+        {
+            var trustedProviders = new Dictionary<string, bool>();
+            if (isEnabled.HasValue)
+            {
+                trustedProviders["SmartHopper.Providers.Test"] = isEnabled.Value;
+            }
+
+            Assert.Equal(
+                expected,
+                ProviderManager.ShouldShowProviderStartupDialog(
+                    trustedProviders,
+                    "SmartHopper.Providers.Test"));
         }
     }
 }
