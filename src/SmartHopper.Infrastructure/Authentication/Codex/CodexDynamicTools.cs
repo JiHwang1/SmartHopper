@@ -189,6 +189,65 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
         void CancelPending();
     }
 
+    /// <summary>Shared execution ownership and cancellation for Dynamic Tool bridges.</summary>
+    internal sealed class CodexToolExecutionState : IDisposable
+    {
+        private readonly SemaphoreSlim gate = new (1, 1);
+        private readonly object sync = new ();
+        private CancellationTokenSource pending = new ();
+        private bool disposed;
+
+        internal void ThrowIfDisposed(string owner)
+        {
+            lock (this.sync)
+            {
+                if (this.disposed) throw new ObjectDisposedException(owner);
+            }
+        }
+
+        internal CancellationTokenSource CreateLinkedCancellation(CancellationToken cancellationToken)
+        {
+            lock (this.sync)
+            {
+                if (this.disposed) throw new ObjectDisposedException(nameof(CodexToolExecutionState));
+                return CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, this.pending.Token);
+            }
+        }
+
+        internal Task WaitAsync(CancellationToken cancellationToken) => this.gate.WaitAsync(cancellationToken);
+
+        internal void Release() => this.gate.Release();
+
+        internal void CancelPending()
+        {
+            CancellationTokenSource cancelled;
+            lock (this.sync)
+            {
+                if (this.disposed) return;
+                cancelled = this.pending;
+                this.pending = new CancellationTokenSource();
+            }
+
+            cancelled.Cancel();
+            cancelled.Dispose();
+        }
+
+        public void Dispose()
+        {
+            CancellationTokenSource cancelled;
+            lock (this.sync)
+            {
+                if (this.disposed) return;
+                this.disposed = true;
+                cancelled = this.pending;
+            }
+
+            cancelled.Cancel();
+            cancelled.Dispose();
+            // Keep the gate alive until an already dispatched mutation releases ownership.
+        }
+    }
+
     /// <summary>
     /// 공통 AITool adapter를 Codex namespace descriptor와 실행 결과로 변환합니다.
     /// Canvas 문서 확인과 승인 정책은 추가 필터 및 실행 callback에서 주입합니다.
@@ -200,10 +259,7 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
         private readonly AIToolExternalCatalog catalog;
         private readonly AIToolExternalExecutor executor;
         private readonly AIToolExternalCatalogOptions options;
-        private readonly SemaphoreSlim executionGate = new (1, 1);
-        private readonly object cancellationSync = new ();
-        private CancellationTokenSource pendingCancellation = new ();
-        private int disposed;
+        private readonly CodexToolExecutionState execution = new ();
 
         public CodexDynamicToolBridge(
             AIToolExternalCatalog catalog,
@@ -219,6 +275,11 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
         {
             this.ThrowIfDisposed();
             var tools = this.catalog.BuildDescriptors(this.options);
+            return BuildNamespace(tools);
+        }
+
+        internal static JArray BuildNamespace(IReadOnlyList<AIToolExternalDescriptor> tools)
+        {
             if (tools.Count == 0)
             {
                 return new JArray();
@@ -257,14 +318,8 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
                 return CodexDynamicToolResult.Error("지원하지 않는 Canvas 도구 namespace입니다.");
             }
 
-            CancellationToken pendingToken;
-            lock (this.cancellationSync)
-            {
-                pendingToken = this.pendingCancellation.Token;
-            }
-
-            using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, pendingToken);
-            await this.executionGate.WaitAsync(linkedCancellation.Token).ConfigureAwait(false);
+            using var linkedCancellation = this.execution.CreateLinkedCancellation(cancellationToken);
+            await this.execution.WaitAsync(linkedCancellation.Token).ConfigureAwait(false);
             try
             {
                 var result = await this.executor.ExecuteAsync(
@@ -280,39 +335,18 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
             }
             finally
             {
-                this.executionGate.Release();
+                this.execution.Release();
             }
         }
 
         public void CancelPending()
         {
-            CancellationTokenSource? cancelled = null;
-            lock (this.cancellationSync)
-            {
-                if (Volatile.Read(ref this.disposed) == 0)
-                {
-                    cancelled = this.pendingCancellation;
-                    this.pendingCancellation = new CancellationTokenSource();
-                }
-            }
-
-            cancelled?.Cancel();
-            cancelled?.Dispose();
+            this.execution.CancelPending();
         }
 
         public void Dispose()
         {
-            if (Interlocked.Exchange(ref this.disposed, 1) != 0)
-            {
-                return;
-            }
-
-            lock (this.cancellationSync)
-            {
-                this.pendingCancellation.Cancel();
-                this.pendingCancellation.Dispose();
-            }
-            // 실행 중인 handler가 finally에서 gate를 반환할 수 있으므로 여기서 dispose하지 않습니다.
+            this.execution.Dispose();
         }
 
         private static string CreateSafeToolError(string toolName)
@@ -322,10 +356,7 @@ namespace SmartHopper.Infrastructure.Authentication.Codex
 
         private void ThrowIfDisposed()
         {
-            if (Volatile.Read(ref this.disposed) != 0)
-            {
-                throw new ObjectDisposedException(nameof(CodexDynamicToolBridge));
-            }
+            this.execution.ThrowIfDisposed(nameof(CodexDynamicToolBridge));
         }
     }
 }

@@ -21,8 +21,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading.Tasks;
-using GhJSON.Core;
-using GhJSON.Core.Serialization;
+using GhJSON.Core.SchemaModels;
 using GhJSON.Grasshopper;
 using GhJSON.Grasshopper.Query;
 using GhJSON.Grasshopper.Serialization;
@@ -45,10 +44,85 @@ namespace SmartHopper.Core.Grasshopper.AITools
     /// </summary>
     public class gh_get : IAIToolProvider
     {
+        private static readonly object PanelHandlerLock = new();
+        private static bool isPanelHandlerCompatible;
+
         /// <summary>
         /// Name of the AI tool provided by this class.
         /// </summary>
         private readonly string toolName = "gh_get";
+
+        private static void EnsurePanelHandlerCompatibility()
+        {
+            lock (PanelHandlerLock)
+            {
+                if (isPanelHandlerCompatible)
+                {
+                    return;
+                }
+
+                var panelHandlerType = typeof(ObjectHandlerRegistry).Assembly.GetType(
+                    "GhJSON.Grasshopper.Serialization.ObjectHandlers.PanelHandler",
+                    throwOnError: true)!;
+                foreach (var handler in ObjectHandlerRegistry.GetAll().Where(panelHandlerType.IsInstanceOfType).ToList())
+                {
+                    ObjectHandlerRegistry.Unregister(handler);
+                }
+
+                var inner = (IObjectHandler)Activator.CreateInstance(panelHandlerType, nonPublic: true)!;
+                ObjectHandlerRegistry.Register(new PanelSchemaCompatibilityHandler(inner));
+                isPanelHandlerCompatible = true;
+            }
+        }
+
+        private sealed class PanelSchemaCompatibilityHandler : IObjectHandler
+        {
+            private readonly IObjectHandler inner;
+
+            public PanelSchemaCompatibilityHandler(IObjectHandler inner)
+            {
+                this.inner = inner;
+            }
+
+            public int Priority => this.inner.Priority;
+
+            public string SchemaExtensionUrl => this.inner.SchemaExtensionUrl;
+
+            public string ExtensionKey => this.inner.ExtensionKey;
+
+            public Guid ComponentGuid => this.inner.ComponentGuid;
+
+            public string ComponentName => this.inner.ComponentName;
+
+            public bool CanHandle(IGH_DocumentObject obj) => this.inner.CanHandle(obj);
+
+            public void Serialize(IGH_DocumentObject obj, GhJsonComponent component)
+            {
+                this.inner.Serialize(obj, component);
+
+                var extensions = component.ComponentState?.Extensions;
+                if (extensions == null || !extensions.TryGetValue("gh.panel", out var panelExtension))
+                {
+                    return;
+                }
+
+                var panelState = JObject.FromObject(panelExtension);
+                if (panelState["alignment"]?.Type == JTokenType.Integer)
+                {
+                    panelState["alignment"] = panelState["alignment"]!.Value<int>() switch
+                    {
+                        0 => "Left",
+                        1 => "Center",
+                        2 => "Right",
+                        var value => value.ToString(),
+                    };
+                    extensions["gh.panel"] = panelState;
+                }
+            }
+
+            public void Deserialize(GhJsonComponent component, IGH_DocumentObject obj)
+                => this.inner.Deserialize(component, obj);
+        }
 
         /// <summary>
         /// Common metadata for all gh_get variants.
@@ -185,7 +259,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
                         }
                     }
                 }",
-                execute: (toolCall) => this.GhGetToolAsync(toolCall, new[] { "+selected" }, null, false));
+                execute: (toolCall) => this.GhGetSelectedToolAsync(toolCall, includeData: false));
 
             // Specialized wrapper: gh_get_selected_with_data
             yield return this.CreateGhGetTool(
@@ -201,7 +275,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
                         }
                     }
                 }",
-                execute: (toolCall) => this.GhGetToolAsync(toolCall, new[] { "+selected" }, null, true),
+                execute: (toolCall) => this.GhGetSelectedToolAsync(toolCall, includeData: true),
                 includeInternalizedData: true);
 
             // Specialized wrapper: gh_get_by_guid
@@ -423,7 +497,19 @@ namespace SmartHopper.Core.Grasshopper.AITools
         /// <param name="forceViewportOnly">When true, restricts results to components visible in the canvas viewport regardless of parameter value.</param>
         /// <param name="includeMessages">When true, forces inclusion of runtime messages (errors/warnings/remarks) regardless of parameter value.</param>
         /// <returns>Task that returns the result of the operation.</returns>
-        private Task<AIReturn> GhGetToolAsync(AIToolCall toolCall, string[] predefinedAttrFilters = null, string[] predefinedTypeFilters = null, bool forceIncludeData = false, bool forceViewportOnly = false, bool includeMessages = false)
+        private Task<AIReturn> GhGetSelectedToolAsync(AIToolCall toolCall, bool includeData)
+        {
+            var args = toolCall.GetToolCall().GetArgumentsOrEmpty();
+            var predefinedGuids = SelectedToolArguments.GetFrozenGuids(args);
+
+            return this.GhGetToolAsync(
+                toolCall,
+                predefinedAttrFilters: predefinedGuids == null ? new[] { "+selected" } : null,
+                forceIncludeData: includeData,
+                predefinedGuids: predefinedGuids);
+        }
+
+        private Task<AIReturn> GhGetToolAsync(AIToolCall toolCall, string[] predefinedAttrFilters = null, string[] predefinedTypeFilters = null, bool forceIncludeData = false, bool forceViewportOnly = false, bool includeMessages = false, List<string> predefinedGuids = null)
         {
             var output = new AIReturn() { Request = toolCall };
 
@@ -464,7 +550,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
                 }
 
                 // GUID restriction
-                var guidStrings = args["guidFilter"]?.ToObject<List<string>>();
+                var guidStrings = predefinedGuids ?? args["guidFilter"]?.ToObject<List<string>>();
                 if (guidStrings != null)
                 {
                     var guids = new List<Guid>();
@@ -476,7 +562,11 @@ namespace SmartHopper.Core.Grasshopper.AITools
                         }
                     }
 
-                    if (guids.Count > 0)
+                    if (predefinedGuids != null)
+                    {
+                        selector.WithGuids(guids.Count > 0 ? guids : new List<Guid> { Guid.Empty });
+                    }
+                    else if (guids.Count > 0)
                     {
                         selector.WithGuids(guids);
                     }
@@ -577,7 +667,12 @@ namespace SmartHopper.Core.Grasshopper.AITools
                     }
                 }
 
+                EnsurePanelHandlerCompatibility();
                 var document = GhJsonGrasshopper.Serialize(resultObjects, serOptions);
+
+                // The handler normalizes Panel state before the library validates it.
+                // Keep the library writer as the serialization/schema boundary.
+                var json = GhJSON.Core.GhJson.ToJson(document, new GhJSON.Core.Serialization.WriteOptions { Indented = false });
 
                 var names = document.Components
                     .Where(c => !string.IsNullOrWhiteSpace(c.Name))
@@ -590,8 +685,6 @@ namespace SmartHopper.Core.Grasshopper.AITools
                     .Select(c => c.InstanceGuid!.Value.ToString())
                     .Distinct()
                     .ToList();
-
-                var json = GhJson.ToJson(document, new WriteOptions { Indented = false });
 
                 var thinComponents = document.Components
                     .Where(c => c.Warnings?.Any(w => w.Contains("without a specialized handler")) == true)

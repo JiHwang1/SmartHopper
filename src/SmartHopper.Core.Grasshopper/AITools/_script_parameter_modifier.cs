@@ -385,11 +385,13 @@ namespace SmartHopper.Core.Grasshopper.AITools
             {
                 var toolInfo = toolCall.GetToolCall();
                 var args = toolInfo.GetArgumentsOrEmpty();
+                var expectedDocument = CanvasAccess.GetCurrentCanvas();
                 var tcs = new TaskCompletionSource<AIReturn>();
                 RhinoApp.InvokeOnUiThread(() =>
                 {
                     try
                     {
+                        CanvasAccess.EnsureActiveDocument(expectedDocument, toolCall.CancellationToken);
                         string message = operation(args);
                         Debug.WriteLine($"[{toolName}] {message}");
                         var body = AIBodyBuilder.Create()

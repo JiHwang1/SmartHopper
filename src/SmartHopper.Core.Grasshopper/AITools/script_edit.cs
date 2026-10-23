@@ -27,6 +27,7 @@ using GhJSON.Core.SchemaModels;
 using GhJSON.Core.Serialization;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using SmartHopper.Core.Grasshopper.Utils.Canvas;
 using SmartHopper.Core.Grasshopper.Utils.Constants;
 using SmartHopper.Core.Grasshopper.Utils.Parsing;
 using SmartHopper.Infrastructure.AICall.Core.Base;
@@ -243,7 +244,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
                     endpoint: this.toolName,
                     body: bodyBuilder.Build());
 
-                var result = await request.Exec().ConfigureAwait(false);
+                var result = await request.Exec(toolCall.CancellationToken).ConfigureAwait(false);
 
                 if (!result.Success)
                 {
@@ -290,7 +291,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
                         endpoint: this.toolName,
                         body: correctionBuilder.Build());
 
-                    var correctionResult = await correctionRequest.Exec().ConfigureAwait(false);
+                    var correctionResult = await correctionRequest.Exec(toolCall.CancellationToken).ConfigureAwait(false);
 
                     if (!correctionResult.Success)
                     {
@@ -478,6 +479,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
 
             try
             {
+                var expectedDocument = CanvasAccess.GetCurrentCanvas();
                 // Parse wrapper arguments (instanceGuid + instructions)
                 var wrapperToolInfo = toolCall.GetToolCall();
                 var wrapperArgs = wrapperToolInfo.Arguments ?? new JObject();
@@ -520,6 +522,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
 
                 var ghGetToolCall = new AIToolCall
                 {
+                    CancellationToken = toolCall.CancellationToken,
                     Provider = toolCall.Provider,
                     Model = toolCall.Model,
                     Endpoint = "gh_get_by_guid",
@@ -568,6 +571,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
 
                 var scriptEditToolCall = new AIToolCall
                 {
+                    CancellationToken = toolCall.CancellationToken,
                     Provider = toolCall.Provider,
                     Model = toolCall.Model,
                     Endpoint = this.toolName,
@@ -622,6 +626,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
 
                 var ghPutToolCall = new AIToolCall
                 {
+                    CancellationToken = toolCall.CancellationToken,
                     Provider = toolCall.Provider,
                     Model = toolCall.Model,
                     Endpoint = "gh_put",
@@ -631,7 +636,9 @@ namespace SmartHopper.Core.Grasshopper.AITools
                     .Add(ghPutToolCallInteraction)
                     .Build();
 
-                var ghPutResult = await AIToolManager.ExecuteTool(ghPutToolCall).ConfigureAwait(false);
+                var ghPutResult = await CanvasAccess.InvokeInDocumentAsync(
+                    expectedDocument, toolCall.CancellationToken,
+                    () => AIToolManager.ExecuteTool(ghPutToolCall)).ConfigureAwait(false);
 
                 if (!ghPutResult.Success)
                 {

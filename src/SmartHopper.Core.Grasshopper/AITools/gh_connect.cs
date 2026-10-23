@@ -127,6 +127,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
 
                 foreach (var connSpec in connectionsArray)
                 {
+                    CanvasAccess.EnsureActiveDocument(doc, toolCall.CancellationToken);
                     var sourceGuidStr = connSpec["sourceGuid"]?.ToString();
                     var targetGuidStr = connSpec["targetGuid"]?.ToString();
                     var sourceParamName = connSpec["sourceParam"]?.ToString();

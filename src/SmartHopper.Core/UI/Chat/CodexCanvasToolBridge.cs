@@ -22,8 +22,10 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using GH_IO.Serialization;
 using Grasshopper;
 using Grasshopper.Kernel;
+using Grasshopper.Kernel.Special;
 using Newtonsoft.Json.Linq;
 using Rhino;
 using SmartHopper.Infrastructure.AITools;
@@ -65,10 +67,7 @@ namespace SmartHopper.Core.UI.Chat
         private readonly Guid documentId;
         private readonly AIToolExternalCatalog catalog;
         private readonly AIToolExternalExecutor executor;
-        private readonly SemaphoreSlim executionGate = new (1, 1);
-        private readonly object cancellationSync = new ();
-        private CancellationTokenSource pendingCancellation = new ();
-        private int disposed;
+        private readonly CodexToolExecutionState execution = new ();
 
         public CodexCanvasToolBridge(GH_Document document)
         {
@@ -110,27 +109,7 @@ namespace SmartHopper.Core.UI.Chat
             var descriptors = this.catalog.BuildDescriptors(options);
             this.AvailableToolCount = descriptors.Count;
             this.RefreshStatus();
-            if (descriptors.Count == 0)
-            {
-                return new JArray();
-            }
-
-            return new JArray
-            {
-                new JObject
-                {
-                    ["type"] = "namespace",
-                    ["name"] = CodexDynamicToolBridge.NamespaceName,
-                    ["description"] = "현재 연결된 Grasshopper Canvas를 조회하고 안전하게 수정하는 SmartHopper 도구",
-                    ["tools"] = new JArray(descriptors.Select(item => new JObject
-                    {
-                        ["type"] = "function",
-                        ["name"] = item.Name,
-                        ["description"] = item.Description,
-                        ["inputSchema"] = item.InputSchema.DeepClone(),
-                    })),
-                },
-            };
+            return CodexDynamicToolBridge.BuildNamespace(descriptors);
         }
 
         public async Task<CodexDynamicToolResult> ExecuteAsync(CodexDynamicToolCall call, CancellationToken cancellationToken)
@@ -157,10 +136,12 @@ namespace SmartHopper.Core.UI.Chat
                 return CodexDynamicToolResult.Error("Canvas editing이 비활성화되어 있습니다. 설정 패널에서 변경 전 확인 모드를 켜세요.");
             }
 
-            using var linked = this.CreateLinkedCancellation(cancellationToken);
-            await this.executionGate.WaitAsync(linked.Token).ConfigureAwait(false);
+            using var linked = this.execution.CreateLinkedCancellation(cancellationToken);
+            var entered = false;
             try
             {
+                await this.execution.WaitAsync(linked.Token).ConfigureAwait(false);
+                entered = true;
                 linked.Token.ThrowIfCancellationRequested();
                 var validation = await this.ValidateDocumentAsync(call.Tool, call.Arguments, linked.Token).ConfigureAwait(false);
                 if (validation != null)
@@ -168,31 +149,70 @@ namespace SmartHopper.Core.UI.Chat
                     return CodexDynamicToolResult.Error(validation);
                 }
 
+                // Freeze selection-based arguments for the approval and its subsequent execution.
+                var arguments = (JObject)call.Arguments.DeepClone();
+                var selectedBeforeApproval = await this.OnUiThreadAsync(
+                    () => this.GetSelectedGuids(call.Tool), linked.Token).ConfigureAwait(false);
+                if (selectedBeforeApproval != null)
+                {
+                    arguments["guids"] = new JArray(selectedBeforeApproval.Select(id => id.ToString("D")));
+                }
+
                 if (risk == CodexCanvasToolRisk.Mutation && this.EditingMode == CodexCanvasEditingMode.ConfirmChanges)
                 {
                     var approval = this.ApprovalHandler;
-                    if (approval == null || !await approval(this.CreateApprovalRequest(call), linked.Token).ConfigureAwait(false))
+                    var approvalRequest = this.CreateApprovalRequest(call, selectedBeforeApproval);
+                    if (approval == null || !await approval(approvalRequest, linked.Token).ConfigureAwait(false))
                     {
                         return CodexDynamicToolResult.Error("사용자가 Canvas 변경을 취소했습니다.");
                     }
                 }
 
-                var before = risk == CodexCanvasToolRisk.Mutation
-                    ? await this.OnUiThreadAsync(this.CreateDocumentFingerprint, linked.Token).ConfigureAwait(false)
-                    : string.Empty;
+                JObject before = new ();
+                string? dispatchError = null;
                 var result = await this.OnUiThreadAsync(
-                    () => this.executor.ExecuteAsync(
+                    () =>
+                    {
+                        // Recheck after approval, in the same UI callback that starts the tool.
+                        linked.Token.ThrowIfCancellationRequested();
+                        var error = this.ValidateDocument(call.Tool, arguments);
+                        if (error != null)
+                        {
+                            dispatchError = error;
+                            return Task.FromResult(AIToolExternalResult.Error(error));
+                        }
+
+                        if (selectedBeforeApproval != null &&
+                            !selectedBeforeApproval.ToHashSet().SetEquals(this.GetSelectedGuids(call.Tool) ?? Array.Empty<Guid>()))
+                        {
+                            dispatchError = "Canvas selection changed while approval was pending. Submit the request again.";
+                            return Task.FromResult(AIToolExternalResult.Error(dispatchError));
+                        }
+
+                        if (!this.catalog.IsExposed(call.Tool, this.CreateOptions()))
+                        {
+                            dispatchError = "Canvas editing permissions changed while approval was pending.";
+                            return Task.FromResult(AIToolExternalResult.Error(dispatchError));
+                        }
+
+                        if (risk == CodexCanvasToolRisk.Mutation)
+                        {
+                            before = this.CaptureCanvasState(call.Tool, arguments);
+                        }
+
+                        return this.executor.ExecuteAsync(
                         call.Tool,
-                        call.Arguments,
+                        arguments,
                         this.CreateOptions(),
                         call.CallId,
                         call.TurnId,
-                        linked.Token),
+                        linked.Token);
+                    },
                     linked.Token).ConfigureAwait(false);
 
                 if (result.IsError)
                 {
-                    return CodexDynamicToolResult.Error(
+                    return CodexDynamicToolResult.Error(dispatchError ??
                         $"Canvas 도구 '{call.Tool}' 실행에 실패했습니다. Rhino runtime message를 확인하세요.");
                 }
 
@@ -201,18 +221,18 @@ namespace SmartHopper.Core.UI.Chat
                     // 실행이 성공한 뒤 들어온 Stop은 이미 적용된 변경을 취소로 오인하지 않도록
                     // postcondition 확인까지 완료한 후 결과를 반환합니다.
                     var after = await this.OnUiThreadAsync(
-                        this.CreateDocumentFingerprint,
+                        () => this.CaptureCanvasState(call.Tool, arguments, result.Payload),
                         CancellationToken.None).ConfigureAwait(false);
+                    var verification = CanvasMutationVerifier.Verify(call.Tool, arguments, result.Payload, before, after);
                     result.Payload["verification"] = new JObject
                     {
-                        ["status"] = string.Equals(before, after, StringComparison.Ordinal)
-                            ? "VerificationFailed"
-                            : "Succeeded",
+                        ["status"] = verification.Status,
+                        ["message"] = verification.Message,
                         ["documentId"] = this.documentId.ToString("D"),
                     };
-                    if (string.Equals(before, after, StringComparison.Ordinal))
+                    if (!verification.IsValid)
                     {
-                        return CodexDynamicToolResult.Error("도구는 완료되었지만 Canvas 변경을 확인하지 못했습니다.");
+                        return CodexDynamicToolResult.Error(verification.Message);
                     }
                 }
 
@@ -222,41 +242,28 @@ namespace SmartHopper.Core.UI.Chat
             {
                 return CodexDynamicToolResult.Error("Canvas 도구 실행이 취소되었습니다.");
             }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[CodexCanvasToolBridge] Execution or verification failed: {ex}");
+                return CodexDynamicToolResult.Error("Canvas tool execution or verification failed. Inspect the Rhino runtime messages before retrying.");
+            }
             finally
             {
-                this.executionGate.Release();
+                if (entered)
+                {
+                    this.execution.Release();
+                }
             }
         }
 
         public void CancelPending()
         {
-            CancellationTokenSource? cancelled = null;
-            lock (this.cancellationSync)
-            {
-                if (Volatile.Read(ref this.disposed) == 0)
-                {
-                    cancelled = this.pendingCancellation;
-                    this.pendingCancellation = new CancellationTokenSource();
-                }
-            }
-
-            cancelled?.Cancel();
-            cancelled?.Dispose();
+            this.execution.CancelPending();
         }
 
         public void Dispose()
         {
-            if (Interlocked.Exchange(ref this.disposed, 1) != 0)
-            {
-                return;
-            }
-
-            lock (this.cancellationSync)
-            {
-                this.pendingCancellation.Cancel();
-                this.pendingCancellation.Dispose();
-            }
-            // 진행 중인 UI 실행이 finally에서 gate를 반환할 수 있으므로 여기서 dispose하지 않습니다.
+            this.execution.Dispose();
         }
 
         private AIToolExternalCatalogOptions CreateOptions()
@@ -284,7 +291,7 @@ namespace SmartHopper.Core.UI.Chat
 
         private CodexCanvasToolRisk GetRisk(AITool tool)
         {
-            if (ReadOnlyTools.Contains(tool.Name) && !tool.MutatesCanvas)
+            if (!tool.MutatesCanvas && (ReadOnlyTools.Contains(tool.Name) || MutationTools.Contains(tool.Name)))
             {
                 return CodexCanvasToolRisk.ReadOnly;
             }
@@ -299,30 +306,33 @@ namespace SmartHopper.Core.UI.Chat
             JObject arguments,
             CancellationToken cancellationToken)
         {
-            return await this.OnUiThreadAsync(() =>
-            {
-                var active = Instances.ActiveCanvas?.Document;
-                var isOpen = Instances.DocumentServer.Any(item => ReferenceEquals(item, this.document));
-                if (!isOpen || this.document.DocumentID != this.documentId || !ReferenceEquals(active, this.document))
-                {
-                    return "Canvas Assistant가 연결된 문서와 현재 활성 문서가 다릅니다. 원래 문서로 돌아가거나 새 대화를 시작하세요.";
-                }
-
-                foreach (var guid in FindTargetGuids(toolName, arguments))
-                {
-                    if (!this.document.Objects.Any(item => item.InstanceGuid == guid))
-                    {
-                        return $"대상 instance GUID가 연결된 Canvas에 없습니다: {guid:D}";
-                    }
-                }
-
-                return null;
-            }, cancellationToken).ConfigureAwait(false);
+            return await this.OnUiThreadAsync(() => this.ValidateDocument(toolName, arguments), cancellationToken).ConfigureAwait(false);
         }
 
-        private CodexCanvasToolApprovalRequest CreateApprovalRequest(CodexDynamicToolCall call)
+        private string? ValidateDocument(string toolName, JObject arguments)
         {
-            var guids = FindTargetGuids(call.Tool, call.Arguments).Distinct().ToList();
+            var active = Instances.ActiveCanvas?.Document;
+            var isOpen = Instances.DocumentServer.Any(item => ReferenceEquals(item, this.document));
+            if (!isOpen || this.document.DocumentID != this.documentId || !ReferenceEquals(active, this.document))
+            {
+                return "Canvas Assistant가 연결된 문서와 현재 활성 문서가 다릅니다. 원래 문서로 돌아가거나 새 대화를 시작하세요.";
+            }
+
+            var objectIds = this.document.Objects.Select(item => item.InstanceGuid).ToHashSet();
+            foreach (var guid in FindTargetGuids(toolName, arguments))
+            {
+                if (!objectIds.Contains(guid))
+                {
+                    return $"대상 instance GUID가 연결된 Canvas에 없습니다: {guid:D}";
+                }
+            }
+
+            return null;
+        }
+
+        private CodexCanvasToolApprovalRequest CreateApprovalRequest(CodexDynamicToolCall call, Guid[]? selectedGuids = null)
+        {
+            var guids = (selectedGuids ?? FindTargetGuids(call.Tool, call.Arguments)).Distinct().ToList();
             return new CodexCanvasToolApprovalRequest
             {
                 ToolName = call.Tool,
@@ -334,24 +344,106 @@ namespace SmartHopper.Core.UI.Chat
             };
         }
 
-        private string CreateDocumentFingerprint()
+        private Guid[]? GetSelectedGuids(string toolName)
         {
-            return string.Join("\n", this.document.Objects
-                .OrderBy(item => item.InstanceGuid)
-                .Select(item => $"{item.InstanceGuid:D}|{item.NickName}|{item.Attributes?.Pivot.X:R},{item.Attributes?.Pivot.Y:R}|{CreateWireFingerprint(item)}"));
+            return toolName.EndsWith("_selected", StringComparison.OrdinalIgnoreCase)
+                ? this.document.Objects.Where(item => item.Attributes?.Selected == true).Select(item => item.InstanceGuid).ToArray()
+                : null;
         }
 
-        private static string CreateWireFingerprint(IGH_DocumentObject item)
+        private JObject CaptureCanvasState(string toolName, JObject arguments, JObject? payload = null)
         {
-            if (item is not GH_Component component)
+            var state = new JObject();
+            var name = toolName.ToLowerInvariant();
+            var targets = FindTargetGuids(toolName, arguments).ToHashSet();
+            var createsObjects = name == "gh_put" || name == "gh_group" || name == "gh_group_selected";
+            if (createsObjects && payload == null)
             {
-                return string.Empty;
+                // Creation needs a complete existence baseline, not every object's fields.
+                foreach (var item in this.document.Objects)
+                {
+                    state[item.InstanceGuid.ToString("D")] = new JObject();
+                }
+
+                return state;
             }
 
-            return string.Join(",", component.Params.Input
-                .SelectMany(parameter => parameter.Sources)
-                .Select(source => source.InstanceGuid)
-                .OrderBy(id => id));
+            if (createsObjects)
+            {
+                var reported = name == "gh_put"
+                    ? payload?["instanceGuids"] as JArray ?? new JArray()
+                    : new JArray(payload?["group"] ?? payload?["groupGuid"]);
+                targets = reported.Select(token => Guid.TryParse(token?.ToString(), out var id) ? id : Guid.Empty)
+                    .Where(id => id != Guid.Empty).ToHashSet();
+            }
+
+            var capturePosition = name == "gh_move" || name == "gh_tidy_up" || name == "gh_tidy_up_selected";
+            var captureLock = name.Contains("toggle_lock") || name.Contains("lock_selected") || name.Contains("unlock_selected");
+            var capturePreview = name.Contains("toggle_preview") || name.Contains("preview_selected");
+            var captureConnections = name == "gh_connect" || name == "gh_disconnect";
+            var captureSerialized = toolName.StartsWith("script_", StringComparison.OrdinalIgnoreCase) ||
+                toolName.StartsWith("gh_parameter_", StringComparison.OrdinalIgnoreCase);
+            foreach (var id in targets)
+            {
+                var item = this.document.FindObject(id, false);
+                if (item == null) continue;
+                var component = item as IGH_Component;
+                var parameter = item as IGH_Param;
+                var value = new JObject();
+                if (capturePosition)
+                {
+                    value["x"] = item.Attributes?.Pivot.X;
+                    value["y"] = item.Attributes?.Pivot.Y;
+                }
+
+                if (captureLock) value["locked"] = component != null ? (bool?)component.Locked : parameter?.Locked;
+                if (capturePreview) value["hidden"] = item is IGH_PreviewObject preview ? (bool?)preview.Hidden : null;
+                if ((captureLock || capturePreview) && name.EndsWith("_selected", StringComparison.Ordinal))
+                {
+                    value["selected"] = item.Attributes?.Selected == true;
+                }
+
+                if (captureConnections)
+                {
+                    var standalone = parameter != null ? new[] { parameter } : Array.Empty<IGH_Param>();
+                    value["inputs"] = new JArray((component != null ? component.Params.Input : (IEnumerable<IGH_Param>)standalone)
+                        .Select(port => CaptureParameter(port, true)));
+                    value["outputs"] = new JArray((component != null ? component.Params.Output : (IEnumerable<IGH_Param>)standalone)
+                        .Select(port => CaptureParameter(port, false)));
+                }
+
+                if (createsObjects && item is GH_Group group)
+                {
+                    value["members"] = new JArray(group.ObjectIDs.Select(id => id.ToString("D")));
+                }
+
+                if (captureSerialized)
+                {
+                    var chunk = new GH_LooseChunk("CanvasVerification");
+                    if (!item.Write(chunk))
+                    {
+                        throw new InvalidOperationException("The target object could not be serialized for Canvas verification.");
+                    }
+
+                    value["serialized"] = Convert.ToBase64String(chunk.Serialize_Binary());
+                }
+
+                state[item.InstanceGuid.ToString("D")] = value;
+            }
+
+            return state;
+        }
+
+        private static JObject CaptureParameter(IGH_Param parameter, bool captureSources)
+        {
+            var state = new JObject
+            {
+                ["guid"] = parameter.InstanceGuid.ToString("D"),
+                ["name"] = parameter.Name,
+                ["nickname"] = parameter.NickName,
+            };
+            if (captureSources) state["sources"] = new JArray(parameter.Sources.Select(source => source.InstanceGuid.ToString("D")));
+            return state;
         }
 
         private static IEnumerable<Guid> FindTargetGuids(string toolName, JToken token)
@@ -395,52 +487,34 @@ namespace SmartHopper.Core.UI.Chat
             }
         }
 
-        private CancellationTokenSource CreateLinkedCancellation(CancellationToken cancellationToken)
-        {
-            lock (this.cancellationSync)
-            {
-                return CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, this.pendingCancellation.Token);
-            }
-        }
-
         private Task<T> OnUiThreadAsync<T>(Func<T> action, CancellationToken cancellationToken)
         {
-            var completion = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
-            cancellationToken.Register(() => completion.TrySetCanceled(cancellationToken));
-            RhinoApp.InvokeOnUiThread(() =>
-            {
-                if (cancellationToken.IsCancellationRequested)
-                {
-                    completion.TrySetCanceled(cancellationToken);
-                    return;
-                }
-
-                try
-                {
-                    completion.TrySetResult(action());
-                }
-                catch (Exception ex)
-                {
-                    completion.TrySetException(ex);
-                }
-            });
-            return completion.Task;
+            return this.OnUiThreadAsync<T>(() => Task.FromResult(action()), cancellationToken);
         }
 
-        private Task<T> OnUiThreadAsync<T>(Func<Task<T>> action, CancellationToken cancellationToken)
+        private async Task<T> OnUiThreadAsync<T>(Func<Task<T>> action, CancellationToken cancellationToken)
         {
             var completion = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
-            cancellationToken.Register(() => completion.TrySetCanceled(cancellationToken));
-            RhinoApp.InvokeOnUiThread(async () =>
+            // Only cancel queued callbacks. Once dispatched, retain the execution gate until the
+            // callback finishes so a second mutation cannot overlap an operation still running.
+            var dispatchState = 0;
+            using var registration = cancellationToken.Register(() =>
             {
-                if (cancellationToken.IsCancellationRequested)
+                if (Interlocked.CompareExchange(ref dispatchState, 2, 0) == 0)
                 {
                     completion.TrySetCanceled(cancellationToken);
+                }
+            });
+            RhinoApp.InvokeOnUiThread(async () =>
+            {
+                if (Interlocked.CompareExchange(ref dispatchState, 1, 0) != 0)
+                {
                     return;
                 }
 
                 try
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     completion.TrySetResult(await action().ConfigureAwait(true));
                 }
                 catch (Exception ex)
@@ -448,7 +522,7 @@ namespace SmartHopper.Core.UI.Chat
                     completion.TrySetException(ex);
                 }
             });
-            return completion.Task;
+            return await completion.Task.ConfigureAwait(false);
         }
 
         private void RefreshStatus()
@@ -460,10 +534,7 @@ namespace SmartHopper.Core.UI.Chat
 
         private void ThrowIfDisposed()
         {
-            if (Volatile.Read(ref this.disposed) != 0)
-            {
-                throw new ObjectDisposedException(nameof(CodexCanvasToolBridge));
-            }
+            this.execution.ThrowIfDisposed(nameof(CodexCanvasToolBridge));
         }
     }
 }

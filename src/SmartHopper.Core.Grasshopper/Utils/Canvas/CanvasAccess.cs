@@ -21,6 +21,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using GhJSON.Grasshopper;
 using Grasshopper;
@@ -124,50 +125,16 @@ namespace SmartHopper.Core.Grasshopper.Utils.Canvas
         /// <returns>True if the instance was found and moved; otherwise false.</returns>
         public static bool MoveInstance(Guid guid, PointF position, bool relative = false, bool redraw = true)
         {
-            var obj = FindInstance(guid);
-            if (obj == null) return false;
+            // Keep the public synchronous entry point, with the same completion and Undo
+            // semantics as batch moves. On the UI thread the async method completes inline.
+            return MoveInstancesAsync(new Dictionary<Guid, PointF> { [guid] = position }, relative, redraw)
+                .GetAwaiter().GetResult().Contains(guid);
+        }
 
-            // Record undo event before moving the instance
-            obj.RecordUndoEvent("[SH] Move Instance");
-            var current = obj.Attributes.Pivot;
-            var target = relative
-                ? new PointF(current.X + position.X, current.Y + position.Y)
-                : position;
-
-            // Skip movement if initial and target positions are the same
-            if (current == target) return false;
-
-            // Animate movement concurrently over 300ms with 15 frames
-            Task.Run(async () =>
-            {
-                const int steps = 15;
-                const int duration = 300;
-                for (int i = 1; i <= steps; i++)
-                {
-                    float t = i / (float)steps;
-                    var x = current.X + (target.X - current.X) * t;
-                    var y = current.Y + (target.Y - current.Y) * t;
-                    var interp = new PointF(x, y);
-                    RhinoApp.InvokeOnUiThread(() =>
-                    {
-                        obj.Attributes.Pivot = interp;
-                        obj.Attributes.ExpireLayout();
-
-                        // Instances.RedrawCanvas();
-                    });
-                    await Task.Delay(duration / steps).ConfigureAwait(false);
-                }
-
-                // Final snap to target
-                RhinoApp.InvokeOnUiThread(() =>
-                {
-                    obj.Attributes.Pivot = target;
-                    obj.Attributes.ExpireLayout();
-                    Instances.RedrawCanvas();
-                });
-            });
-
-            return true;
+        /// <summary>Compatibility entry point for synchronous batch moves.</summary>
+        public static List<Guid> MoveInstance(IDictionary<Guid, PointF> targets, bool relative = false, bool redraw = true)
+        {
+            return MoveInstancesAsync(targets, relative, redraw).GetAwaiter().GetResult();
         }
 
         /// <summary>
@@ -176,85 +143,94 @@ namespace SmartHopper.Core.Grasshopper.Utils.Canvas
         /// <param name="targets">A mapping of instance GUIDs to target positions.</param>
         /// <param name="relative">If true, interprets target positions as offsets from current positions.</param>
         /// <param name="redraw">True to redraw the canvas after moving objects.</param>
-        /// <returns>The list of GUIDs that were successfully moved.</returns>
-        public static List<Guid> MoveInstance(IDictionary<Guid, PointF> targets, bool relative = false, bool redraw = true)
+        /// <returns>A task containing the GUIDs that were successfully moved after the final positions and undo record are applied.</returns>
+        public static Task<List<Guid>> MoveInstancesAsync(IDictionary<Guid, PointF> targets, bool relative = false, bool redraw = true)
         {
-            var doc = GetCurrentCanvas();
-            var moved = new List<Guid>();
-            var moves = new List<(IGH_DocumentObject obj, PointF start, PointF target)>();
+            return MoveInstancesAsync(targets, relative, redraw, CancellationToken.None, GetCurrentCanvas());
+        }
 
-            // Collect valid moves
-            foreach (var kvp in targets)
+        /// <summary>Moves only within the captured document, checking cancellation before the UI mutation.</summary>
+        public static Task<List<Guid>> MoveInstancesAsync(IDictionary<Guid, PointF> targets, bool relative, bool redraw, CancellationToken cancellationToken, GH_Document document)
+        {
+            if (targets == null) throw new ArgumentNullException(nameof(targets));
+            var requested = targets.ToArray();
+            var completion = new TaskCompletionSource<List<Guid>>(TaskCreationOptions.RunContinuationsAsynchronously);
+            void ApplyMoves()
             {
-                var obj = FindInstance(kvp.Key);
-                if (obj == null) continue;
-                var start = obj.Attributes.Pivot;
-                var targetPos = relative
-                    ? new PointF(start.X + kvp.Value.X, start.Y + kvp.Value.Y)
-                    : kvp.Value;
-                if (start == targetPos) continue;
-                moves.Add((obj, start, targetPos));
-                moved.Add(kvp.Key);
-            }
-
-            if (!moves.Any())
-            {
-                return moved;
-            }
-
-            // Start the batch record (this also captures the first object's action for you)
-            var undo = doc.UndoUtil.CreateGenericObjectEvent(
-                "[SH] Move Instances",
-                moves[0].obj);
-
-            // For every other object, grab its auto-generated action and append it
-            foreach (var (obj, _, _) in moves.Skip(1))
-            {
-                obj.RecordUndoEvent(undo);
-            }
-
-            // Animate all moves
-            Task.Run(async () =>
-            {
-                const int steps = 15;
-                const int duration = 300;
-                for (int i = 1; i <= steps; i++)
+                try
                 {
-                    float t = i / (float)steps;
-                    RhinoApp.InvokeOnUiThread(() =>
+                    EnsureActiveDocument(document, cancellationToken);
+                    var objects = document.Objects.ToDictionary(item => item.InstanceGuid);
+                    var moves = new List<(IGH_DocumentObject obj, PointF target)>();
+                    var moved = new List<Guid>();
+                    foreach (var kvp in requested)
                     {
-                        foreach (var (obj, start, targetPos) in moves)
+                        if (!objects.TryGetValue(kvp.Key, out var obj)) continue;
+                        var start = obj.Attributes.Pivot;
+                        var target = relative ? new PointF(start.X + kvp.Value.X, start.Y + kvp.Value.Y) : kvp.Value;
+                        if (start == target) continue;
+                        moves.Add((obj, target));
+                        moved.Add(kvp.Key);
+                    }
+
+                    if (moves.Count > 0)
+                    {
+                        var undo = document.UndoUtil.CreateGenericObjectEvent("[SH] Move Instances", moves[0].obj);
+                        foreach (var move in moves.Skip(1)) move.obj.RecordUndoEvent(undo);
+                        foreach (var move in moves)
                         {
-                            var ix = start.X + (targetPos.X - start.X) * t;
-                            var iy = start.Y + (targetPos.Y - start.Y) * t;
-                            var interp = new PointF(ix, iy);
-                            obj.Attributes.Pivot = interp;
-                            obj.Attributes.ExpireLayout();
+                            move.obj.Attributes.Pivot = move.target;
+                            move.obj.Attributes.ExpireLayout();
                         }
-                    });
 
-                    await Task.Delay(duration / steps).ConfigureAwait(false);
+                        document.UndoUtil.RecordEvent(undo);
+                        if (redraw) Instances.RedrawCanvas();
+                    }
+
+                    completion.TrySetResult(moved);
                 }
-
-                // Final snap to target
-                RhinoApp.InvokeOnUiThread(() =>
+                catch (Exception ex)
                 {
-                    foreach (var (obj, _, targetPos) in moves)
-                    {
-                        obj.Attributes.Pivot = targetPos;
-                        obj.Attributes.ExpireLayout();
-                    }
+                    completion.TrySetException(ex);
+                }
+            }
 
-                    if (redraw)
-                    {
-                        Instances.RedrawCanvas();
-                    }
+            if (RhinoApp.InvokeRequired) RhinoApp.InvokeOnUiThread((Action)ApplyMoves);
+            else ApplyMoves();
+            return completion.Task;
+        }
 
-                    // Once everything's in place, commit the record as a single undo step
-                    doc.UndoUtil.RecordEvent(undo);
-                });
-            });
-            return moved;
+        /// <summary>Rejects a closed/switched document and cancellation before a queued Canvas mutation.</summary>
+        internal static void EnsureActiveDocument(GH_Document document, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (document == null || !ReferenceEquals(Instances.ActiveCanvas?.Document, document) ||
+                !Instances.DocumentServer.Any(item => ReferenceEquals(item, document)))
+            {
+                throw new InvalidOperationException("The active Grasshopper document changed before the Canvas operation could execute.");
+            }
+        }
+
+        /// <summary>Starts a follow-up tool on the UI thread only if its original document is still active.</summary>
+        internal static Task<T> InvokeInDocumentAsync<T>(GH_Document document, CancellationToken cancellationToken, Func<Task<T>> action)
+        {
+            var completion = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+            async void Run()
+            {
+                try
+                {
+                    EnsureActiveDocument(document, cancellationToken);
+                    completion.TrySetResult(await action().ConfigureAwait(true));
+                }
+                catch (Exception ex)
+                {
+                    completion.TrySetException(ex);
+                }
+            }
+
+            if (RhinoApp.InvokeRequired) RhinoApp.InvokeOnUiThread((Action)Run);
+            else Run();
+            return completion.Task;
         }
 
         /// <summary>

@@ -71,7 +71,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
                     },
                     ""required"": [""guids""]
                 }",
-                execute: this.GhGroupAsync,
+                execute: toolCall => this.GhGroupAsync(toolCall),
                 mutatesCanvas: true,
                 tags: new[] { "canvas", "components", "mutating", "organization" },
                 outputSchema: @"{ ""type"": ""object"", ""properties"": { ""group"": { ""type"": ""string"", ""description"": ""Instance GUID of the created group."" }, ""grouped"": { ""type"": ""array"", ""items"": { ""type"": ""string"" }, ""description"": ""Instance GUIDs of the components that were added to the group."" } } }",
@@ -102,7 +102,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
                 annotations: new AIToolAnnotations(destructiveHint: false));
         }
 
-        private async Task<AIReturn> GhGroupAsync(AIToolCall toolCall)
+        private async Task<AIReturn> GhGroupAsync(AIToolCall toolCall, JObject argsOverride = null)
         {
             // Prepare the output
             var output = new AIReturn()
@@ -117,7 +117,8 @@ namespace SmartHopper.Core.Grasshopper.AITools
 
                 // Extract parameters
                 AIInteractionToolCall toolInfo = toolCall.GetToolCall();
-                var args = toolInfo.GetArgumentsOrEmpty();
+                var args = argsOverride ?? toolInfo.GetArgumentsOrEmpty();
+                var expectedDocument = CanvasAccess.GetCurrentCanvas();
                 var guidStrings = args["guids"]?.ToObject<List<string>>() ?? new List<string>();
                 var groupName = args["groupName"]?.ToString();
                 var colorStr = args["color"]?.ToString();
@@ -147,6 +148,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
                 {
                     try
                     {
+                        CanvasAccess.EnsureActiveDocument(expectedDocument, toolCall.CancellationToken);
                         // Parse color if provided
                         var groupColor = System.Drawing.Color.Empty;
                         if (!string.IsNullOrEmpty(colorStr))
@@ -179,11 +181,8 @@ namespace SmartHopper.Core.Grasshopper.AITools
                         }
 
                         // Add group to document
-                        var canvas = Instances.ActiveCanvas;
-                        if (canvas?.Document != null)
-                        {
-                            canvas.Document.AddObject(group, false);
-                        }
+                        expectedDocument.UndoUtil.RecordAddObjectEvent("[SH] Group Components", group);
+                        expectedDocument.AddObject(group, false);
 
                         // Update UI
                         Instances.RedrawCanvas();
@@ -231,10 +230,11 @@ namespace SmartHopper.Core.Grasshopper.AITools
             toolCall.SkipMetricsValidation = true;
 
             // Get selected component GUIDs
-            var selectedGuids = CanvasAccess.GetCurrentObjects()
+            var args = toolCall.GetToolCall().GetArgumentsOrEmpty();
+            var selectedGuids = SelectedToolArguments.GetGuids(args, () => CanvasAccess.GetCurrentObjects()
                 .Where(o => o.Attributes.Selected)
                 .Select(o => o.InstanceGuid.ToString())
-                .ToList();
+                .ToList());
 
             if (!selectedGuids.Any())
             {
@@ -243,37 +243,10 @@ namespace SmartHopper.Core.Grasshopper.AITools
                 return Task.FromResult(output);
             }
 
-            // Create a modified tool call with the selected GUIDs
-            var toolInfo = toolCall.GetToolCall();
-            var args = toolInfo.GetArgumentsOrEmpty();
-            var modifiedArgs = new JObject
-            {
-                ["guids"] = JArray.FromObject(selectedGuids)
-            };
-
-            // Preserve optional parameters if provided
-            if (args["groupName"] != null)
-                modifiedArgs["groupName"] = args["groupName"];
-            if (args["color"] != null)
-                modifiedArgs["color"] = args["color"];
-
-            // Create a new tool call with modified arguments
-            var modifiedToolCall = new AIToolCall
-            {
-                Provider = toolCall.Provider,
-                Model = toolCall.Model,
-                Body = AIBodyBuilder.Create()
-                    .AddToolCall(
-                        id: toolInfo.Id,
-                        name: toolInfo.Name ?? "gh_group_selected",
-                        args: modifiedArgs)
-                    .Build()
-            };
-
-            modifiedToolCall.SkipMetricsValidation = true;
-
-            // Delegate to the general method
-            return this.GhGroupAsync(modifiedToolCall);
+            // Forward the original call with the frozen selected GUIDs.
+            var modifiedArgs = (JObject)args.DeepClone();
+            modifiedArgs["guids"] = JArray.FromObject(selectedGuids);
+            return this.GhGroupAsync(toolCall, modifiedArgs);
         }
     }
 }

@@ -66,7 +66,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
                     },
                     ""required"": [ ""guids"", ""locked"" ]
                 }",
-                execute: this.GhToggleLockAsync,
+                execute: toolCall => this.GhToggleLockAsync(toolCall),
                 mutatesCanvas: true,
                 tags: new[] { "canvas", "components", "mutating", "state" },
                 outputSchema: @"{ ""type"": ""object"", ""properties"": { ""success"": { ""type"": ""boolean"" }, ""affectedGuids"": { ""type"": ""array"" } } }",
@@ -103,7 +103,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
                 annotations: new AIToolAnnotations(destructiveHint: false));
         }
 
-        private async Task<AIReturn> GhToggleLockAsync(AIToolCall toolCall)
+        private async Task<AIReturn> GhToggleLockAsync(AIToolCall toolCall, JObject argsOverride = null)
         {
             // Prepare the output
             var output = new AIReturn()
@@ -118,7 +118,8 @@ namespace SmartHopper.Core.Grasshopper.AITools
 
                 // Extract parameters
                 AIInteractionToolCall toolInfo = toolCall.GetToolCall();
-                var args = toolInfo.GetArgumentsOrEmpty();
+                var args = argsOverride ?? toolInfo.GetArgumentsOrEmpty();
+                var expectedDocument = CanvasAccess.GetCurrentCanvas();
                 var guids = args["guids"]?.ToObject<List<string>>() ?? new List<string>();
                 var locked = args["locked"]?.ToObject<bool>() ?? false;
                 Debug.WriteLine($"[GhObjTools] GhToggleLockAsync: locked={locked}, guids count={guids.Count}");
@@ -151,6 +152,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
                 foreach (var guid in allowedGuids)
                 {
                     Debug.WriteLine($"[GhObjTools] Parsed GUID: {guid}");
+                    CanvasAccess.EnsureActiveDocument(expectedDocument, toolCall.CancellationToken);
                     ComponentManipulation.SetComponentLock(guid, locked);
                     Debug.WriteLine($"[GhObjTools] Set lock to {locked} for GUID: {guid}");
                     updated.Add(guid.ToString());
@@ -178,10 +180,11 @@ namespace SmartHopper.Core.Grasshopper.AITools
         private async Task<AIReturn> GhToggleLockSelectedAsync(AIToolCall toolCall, bool locked)
         {
             // Get selected component GUIDs
-            var selectedGuids = CanvasAccess.GetCurrentObjects()
+            var args = toolCall.GetToolCall().GetArgumentsOrEmpty();
+            var selectedGuids = SelectedToolArguments.GetGuids(args, () => CanvasAccess.GetCurrentObjects()
                 .Where(o => o.Attributes.Selected)
                 .Select(o => o.InstanceGuid.ToString())
-                .ToList();
+                .ToList());
 
             if (!selectedGuids.Any())
             {
@@ -190,29 +193,14 @@ namespace SmartHopper.Core.Grasshopper.AITools
                 return output;
             }
 
-            // Create a modified tool call with the selected GUIDs
-            var toolInfo = toolCall.GetToolCall();
+            // Forward the original call with the frozen selected GUIDs.
             var modifiedArgs = new JObject
             {
                 ["guids"] = JArray.FromObject(selectedGuids),
                 ["locked"] = locked
             };
 
-            // Create a new tool call with modified arguments
-            var modifiedToolCall = new AIToolCall
-            {
-                Provider = toolCall.Provider,
-                Model = toolCall.Model,
-                Body = AIBodyBuilder.Create()
-                    .AddToolCall(
-                        id: toolInfo.Id,
-                        name: toolInfo.Name ?? (locked ? "gh_lock_selected" : "gh_unlock_selected"),
-                        args: modifiedArgs)
-                    .Build()
-            };
-
-            // Delegate to the general method
-            return await this.GhToggleLockAsync(modifiedToolCall).ConfigureAwait(false);
+            return await this.GhToggleLockAsync(toolCall, modifiedArgs).ConfigureAwait(false);
         }
     }
 }

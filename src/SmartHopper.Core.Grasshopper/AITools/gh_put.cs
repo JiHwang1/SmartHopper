@@ -95,6 +95,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
                 // Extract parameters
                 AIInteractionToolCall toolInfo = toolCall.GetToolCall();
                 var args = toolInfo.GetArgumentsOrEmpty();
+                var expectedDocument = CanvasAccess.GetCurrentCanvas();
                 var json = ExtractGhJsonString(args["ghjson"]);
                 var editMode = args["editMode"]?.ToObject<bool>() ?? false;
                 var autoOffset = args["autoOffset"]?.ToObject<bool>() ?? !editMode;
@@ -339,7 +340,8 @@ namespace SmartHopper.Core.Grasshopper.AITools
                 {
                     try
                     {
-                        var ghDoc = GhJsonGrasshopper.GetActiveDocument();
+                        CanvasAccess.EnsureActiveDocument(expectedDocument, toolCall.CancellationToken);
+                        var ghDoc = expectedDocument;
 
                         // Remove existing components that will be replaced
                         // Keep document enabled - disabling causes "object expired" errors

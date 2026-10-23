@@ -65,7 +65,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
                     },
                     ""required"": [ ""guids"", ""previewOn"" ]
                 }",
-                execute: this.GhTogglePreviewAsync,
+                execute: toolCall => this.GhTogglePreviewAsync(toolCall),
                 mutatesCanvas: true,
                 tags: new[] { "canvas", "components", "mutating", "preview", "viewport" },
                 outputSchema: @"{ ""type"": ""object"", ""properties"": { ""success"": { ""type"": ""boolean"" }, ""affectedGuids"": { ""type"": ""array"" } } }",
@@ -102,7 +102,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
                 annotations: new AIToolAnnotations(destructiveHint: false));
         }
 
-        private async Task<AIReturn> GhTogglePreviewAsync(AIToolCall toolCall)
+        private async Task<AIReturn> GhTogglePreviewAsync(AIToolCall toolCall, JObject argsOverride = null)
         {
             var output = new AIReturn()
             {
@@ -115,7 +115,8 @@ namespace SmartHopper.Core.Grasshopper.AITools
                 toolCall.SkipMetricsValidation = true;
 
                 AIInteractionToolCall toolInfo = toolCall.GetToolCall();
-                var args = toolInfo.GetArgumentsOrEmpty();
+                var args = argsOverride ?? toolInfo.GetArgumentsOrEmpty();
+                var expectedDocument = CanvasAccess.GetCurrentCanvas();
                 var guids = args["guids"]?.ToObject<List<string>>() ?? new List<string>();
                 var previewOn = args["previewOn"]?.ToObject<bool>() ?? false;
                 Debug.WriteLine($"[GhObjTools] GhTogglePreviewAsync: previewOn={previewOn}, guids count={guids.Count}");
@@ -127,6 +128,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
                     if (Guid.TryParse(s, out var guid))
                     {
                         Debug.WriteLine($"[GhObjTools] Parsed GUID: {guid}");
+                        CanvasAccess.EnsureActiveDocument(expectedDocument, toolCall.CancellationToken);
                         ComponentManipulation.SetComponentPreview(guid, previewOn);
                         Debug.WriteLine($"[GhObjTools] Set preview to {previewOn} for GUID: {guid}");
                         updated.Add(guid.ToString());
@@ -156,10 +158,11 @@ namespace SmartHopper.Core.Grasshopper.AITools
         private async Task<AIReturn> GhTogglePreviewSelectedAsync(AIToolCall toolCall, bool previewOn)
         {
             // Get selected component GUIDs
-            var selectedGuids = CanvasAccess.GetCurrentObjects()
+            var args = toolCall.GetToolCall().GetArgumentsOrEmpty();
+            var selectedGuids = SelectedToolArguments.GetGuids(args, () => CanvasAccess.GetCurrentObjects()
                 .Where(o => o.Attributes.Selected)
                 .Select(o => o.InstanceGuid.ToString())
-                .ToList();
+                .ToList());
 
             if (!selectedGuids.Any())
             {
@@ -168,29 +171,14 @@ namespace SmartHopper.Core.Grasshopper.AITools
                 return output;
             }
 
-            // Create a modified tool call with the selected GUIDs
-            var toolInfo = toolCall.GetToolCall();
+            // Forward the original call with the frozen selected GUIDs.
             var modifiedArgs = new JObject
             {
                 ["guids"] = JArray.FromObject(selectedGuids),
                 ["previewOn"] = previewOn
             };
 
-            // Create a new tool call with modified arguments
-            var modifiedToolCall = new AIToolCall
-            {
-                Provider = toolCall.Provider,
-                Model = toolCall.Model,
-                Body = AIBodyBuilder.Create()
-                    .AddToolCall(
-                        id: toolInfo.Id,
-                        name: toolInfo.Name ?? (previewOn ? "gh_show_preview_selected" : "gh_hide_preview_selected"),
-                        args: modifiedArgs)
-                    .Build()
-            };
-
-            // Delegate to the general method
-            return await this.GhTogglePreviewAsync(modifiedToolCall).ConfigureAwait(false);
+            return await this.GhTogglePreviewAsync(toolCall, modifiedArgs).ConfigureAwait(false);
         }
     }
 }

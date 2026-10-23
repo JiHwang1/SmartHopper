@@ -123,7 +123,8 @@ namespace SmartHopper.Core.Grasshopper.AITools
                     }
                 }
 
-                var movedList = CanvasAccess.MoveInstance(dict, relative);
+                var document = CanvasAccess.GetCurrentCanvas();
+                var movedList = await CanvasAccess.MoveInstancesAsync(dict, relative, true, toolCall.CancellationToken, document).ConfigureAwait(false);
 
                 var toolResult = new JObject
                 {

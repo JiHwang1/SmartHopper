@@ -18,16 +18,18 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using GhJSON.Core.DependencyGraph;
+using GhJSON.Core.SchemaModels;
 using GhJSON.Grasshopper;
 using GhJSON.Grasshopper.LayoutRefinements;
 using GhJSON.Grasshopper.Serialization;
 using Grasshopper;
 using Newtonsoft.Json.Linq;
+using Rhino;
 using SmartHopper.Core.Grasshopper.Utils.Canvas;
 using SmartHopper.Infrastructure.AICall.Core.Interactions;
 using SmartHopper.Infrastructure.AICall.Core.Returns;
@@ -37,7 +39,7 @@ using SmartHopper.Infrastructure.AITools;
 namespace SmartHopper.Core.Grasshopper.AITools
 {
     /// <summary>
-    /// Tool provider for toggling Grasshopper component preview by GUID.
+    /// Tool provider for arranging Grasshopper components by data flow.
     /// </summary>
     public class gh_tidy_up : IAIToolProvider
     {
@@ -47,7 +49,7 @@ namespace SmartHopper.Core.Grasshopper.AITools
         private readonly string toolName = "gh_tidy_up";
 
         /// <summary>
-        /// Returns AI tools for component visibility control.
+        /// Returns AI tools for arranging components.
         /// </summary>
         /// <returns></returns>
         public IEnumerable<AITool> GetTools()
@@ -116,213 +118,163 @@ namespace SmartHopper.Core.Grasshopper.AITools
                 annotations: new AIToolAnnotations(destructiveHint: false));
         }
 
-        /// <summary>
-        /// Reorganize selected components into a tidy grid layout by GUID list.
-        /// </summary>
-        private Task<AIReturn> GhTidyUpAsync(AIToolCall toolCall)
-        {
-            // Prepare the output
-            var output = new AIReturn()
-            {
-                Request = toolCall,
-            };
+        private Task<AIReturn> GhTidyUpAsync(AIToolCall toolCall) => this.TidyUpAsync(toolCall, false);
 
+        private Task<AIReturn> GhTidyUpSelectedAsync(AIToolCall toolCall) => this.TidyUpAsync(toolCall, true);
+
+        private async Task<AIReturn> TidyUpAsync(AIToolCall toolCall, bool selectedOnly)
+        {
+            var output = new AIReturn { Request = toolCall };
+            toolCall.SkipMetricsValidation = true;
             try
             {
-                // Local tool: skip metrics validation (provider/model/finish_reason not required)
-                toolCall.SkipMetricsValidation = true;
-
-                // Extract parameters
-                AIInteractionToolCall toolInfo = toolCall.GetToolCall();
+                var token = toolCall.CancellationToken;
+                var toolInfo = toolCall.GetToolCall();
                 var args = toolInfo.GetArgumentsOrEmpty();
-                var guids = args["guids"]?.ToObject<List<string>>() ?? new List<string>();
+                var requested = args["guids"]?.ToObject<List<string>>()
+                    .Select(text => Guid.TryParse(text, out var id) ? id : Guid.Empty)
+                    .Where(id => id != Guid.Empty).ToHashSet();
                 var startToken = args["startPoint"];
                 var hasStart = startToken != null;
-                PointF origin = default;
-                if (hasStart)
-                {
-                    var sx = startToken["x"]?.ToObject<float>() ?? 0f;
-                    var sy = startToken["y"]?.ToObject<float>() ?? 0f;
-                    origin = new PointF(sx, sy);
-                }
-
-                var currentObjs = CanvasAccess.GetCurrentObjects();
-                var selected = currentObjs.Where(o => guids.Contains(o.InstanceGuid.ToString())).ToList();
+                var origin = hasStart
+                    ? new PointF(startToken["x"]?.ToObject<float>() ?? 0f, startToken["y"]?.ToObject<float>() ?? 0f)
+                    : default;
                 var viewportOnly = args["viewportOnly"]?.ToObject<bool>() ?? false;
-
-                if (viewportOnly)
+                var canvasDocument = await OnUiThreadAsync(CanvasAccess.GetCurrentCanvas, token).ConfigureAwait(false);
+                var snapshot = await CanvasAccess.InvokeInDocumentAsync(canvasDocument, token, () =>
                 {
-                    var canvas = Instances.ActiveCanvas;
-                    if (canvas?.Viewport != null)
+                    // Native selection, bounds, and serialization are confined to the UI thread.
+                    var selected = CanvasAccess.GetCurrentObjects().Where(item => requested != null
+                        ? requested.Contains(item.InstanceGuid)
+                        : selectedOnly && item.Attributes?.Selected == true).ToList();
+                    var viewport = Instances.ActiveCanvas?.Viewport;
+                    if (viewportOnly && viewport != null)
                     {
-                        var visibleRegion = canvas.Viewport.VisibleRegion;
-                        selected = selected.Where(o =>
-                        {
-                            var bounds = o.Attributes?.Bounds;
-                            return bounds.HasValue && visibleRegion.IntersectsWith(bounds.Value);
-                        }).ToList();
+                        var visibleRegion = viewport.VisibleRegion;
+                        selected = selected.Where(item => item.Attributes != null &&
+                            visibleRegion.IntersectsWith(item.Attributes.Bounds)).ToList();
                     }
-                }
-                
-                if (!selected.Any())
-                {
-                    Debug.WriteLine("[GhObjTools] GhTidyUpAsync: No matching components found after filtering.");
-                    output.CreateError("No matching components found.");
-                    return Task.FromResult(output);
-                }
 
-                var doc = GhJsonGrasshopper.Serialize(selected, SerializationOptions.Default);
-
-                // Core dependency-graph layout (longest-path layering, dummy-chain routing,
-                // crossing minimization, bounds-aware coordinates) followed by Grasshopper-aware
-                // refinements that use real component bounds and input-port positions for
-                // alignment and collision avoidance. This is the same pipeline used by gh_put,
-                // so placement and tidy-up stay consistent.
-                const float spacingX = 200f;
-                const float spacingY = 100f;
-                const float islandSpacingY = 150f;
-
-                var layoutResult = GhJSON.Core.GhJson.CalculateLayout(doc, new LayoutOptions
-                {
-                    SpacingX = spacingX,
-                    SpacingY = spacingY,
-                    IslandSpacingY = islandSpacingY,
-                });
-
-                var positions = LayoutRefinementEngine.ApplyRefinements(
-                    layoutResult,
-                    doc,
-                    new LayoutRefinementOptions
+                    if (selected.Count == 0)
                     {
-                        SpacingX = spacingX,
-                        SpacingY = spacingY,
-                        ApplyBoundsAwareSpacing = true,
-                        AlignParamsToInputPorts = true,
-                        AlignOneToOneConnections = true,
-                        MinimizeConnectionLengths = true,
-                        AvoidCollisions = true,
-                    });
+                        throw new InvalidOperationException(selectedOnly
+                            ? "No selected components are visible in the current viewport."
+                            : "No matching components found.");
+                    }
 
-                if (positions.Count == 0)
-                {
-                    Debug.WriteLine("[GhObjTools] GhTidyUpAsync: Layout produced no positions.");
-                    output.CreateError("Layout produced no positions for the selected components.");
-                    return Task.FromResult(output);
-                }
+                    var serialized = GhJsonGrasshopper.Serialize(selected, SerializationOptions.Default);
+                    var pivots = selected.ToDictionary(item => item.InstanceGuid, item => item.Attributes.Pivot);
+                    return Task.FromResult((Document: serialized, Layout: CopyLayoutGraph(serialized), Pivots: pivots));
+                }).ConfigureAwait(false);
 
-                if (!hasStart)
+                // Only the detached graph of IDs, integer pivots, and connection endpoints enters Task.Run.
+                // GhJSON.Core 1.1.1 CalculateLayout has no Rhino/Grasshopper assembly dependencies.
+                var layout = await CalculateLayoutAsync(snapshot.Layout, token).ConfigureAwait(false);
+                token.ThrowIfCancellationRequested();
+                var placement = await CanvasAccess.InvokeInDocumentAsync(canvasDocument, token, async () =>
                 {
-                    // Anchor the laid-out cluster at the original pivot of the top-left component
-                    // so the tidied result stays roughly where the user had it.
-                    var firstKvp = positions.OrderBy(p => p.Value.X).ThenBy(p => p.Value.Y).First();
-                    var origObj = selected.First(o => o.InstanceGuid == firstKvp.Key);
-                    var origPivot = origObj.Attributes.Pivot;
-                    origin = new PointF(origPivot.X - firstKvp.Value.X, origPivot.Y - firstKvp.Value.Y);
-                }
+                    if (snapshot.Pivots.Keys.Any(id => canvasDocument.FindObject(id, false) == null))
+                    {
+                        throw new InvalidOperationException("A layout target was removed while layout was being calculated.");
+                    }
 
-                var moved = new List<string>();
-                foreach (var kvp in positions)
-                {
-                    var guid = kvp.Key;
-                    var target = new PointF(origin.X + kvp.Value.X, origin.Y + kvp.Value.Y);
-                    var ok = CanvasAccess.MoveInstance(guid, target, relative: false);
-                    Debug.WriteLine(ok
-                        ? $"[GhObjTools] GhTidyUpAsync: Moved {guid} to ({target.X},{target.Y})"
-                        : $"[GhObjTools] GhTidyUpAsync: Failed to move {guid}, not found");
-                    if (ok) moved.Add(guid.ToString());
-                }
+                    // Refinements resolve native bounds and ports: they must remain on the UI thread.
+                    var positions = LayoutRefinementEngine.ApplyRefinements(layout, snapshot.Document,
+                        new LayoutRefinementOptions
+                        {
+                            SpacingX = 200f,
+                            SpacingY = 100f,
+                            ApplyBoundsAwareSpacing = true,
+                            AlignParamsToInputPorts = true,
+                            AlignOneToOneConnections = true,
+                            MinimizeConnectionLengths = true,
+                            AvoidCollisions = true,
+                        });
+                    if (positions.Count == 0)
+                    {
+                        throw new InvalidOperationException("Layout produced no positions for the selected components.");
+                    }
 
-                var toolResult = new JObject
+                    if (!hasStart)
+                    {
+                        var first = positions.OrderBy(item => item.Value.X).ThenBy(item => item.Value.Y).First();
+                        var pivot = snapshot.Pivots[first.Key];
+                        origin = new PointF(pivot.X - first.Value.X, pivot.Y - first.Value.Y);
+                    }
+
+                    var targets = positions.ToDictionary(item => item.Key,
+                        item => new PointF(origin.X + item.Value.X, origin.Y + item.Value.Y));
+                    var moved = await CanvasAccess.MoveInstancesAsync(targets, false, true, token, canvasDocument).ConfigureAwait(true);
+                    return (Moved: moved, Targets: targets);
+                }).ConfigureAwait(false);
+
+                var result = new JObject
                 {
-                    ["moved"] = JArray.FromObject(moved),
+                    ["moved"] = JArray.FromObject(placement.Moved.Select(id => id.ToString())),
+                    ["targets"] = new JObject(placement.Targets.Select(item => new JProperty(item.Key.ToString("D"),
+                        new JObject { ["x"] = item.Value.X, ["y"] = item.Value.Y }))),
                 };
-                var immutableBody = AIBodyBuilder.Create()
-                    .AddToolResult(toolResult, id: toolInfo.Id, name: toolInfo.Name ?? this.toolName)
+                var body = AIBodyBuilder.Create()
+                    .AddToolResult(result, id: toolInfo.Id, name: toolInfo.Name ?? this.toolName)
                     .Build();
-
-                output.CreateSuccess(immutableBody, toolCall);
-                return Task.FromResult(output);
+                output.CreateSuccess(body, toolCall);
             }
             catch (Exception ex)
             {
                 output.CreateError($"Error: {ex.Message}");
-                return Task.FromResult(output);
             }
+
+            return output;
         }
 
-        /// <summary>
-        /// Reorganizes the currently selected components into a tidy grid layout.
-        /// Collects selected objects first, applies optional viewport filtering, then delegates to GhTidyUpAsync.
-        /// </summary>
-        private async Task<AIReturn> GhTidyUpSelectedAsync(AIToolCall toolCall)
+        private static GhJsonDocument CopyLayoutGraph(GhJsonDocument document)
         {
-            // Parse arguments first so viewportOnly is available before filtering
-            var toolInfo = toolCall.GetToolCall();
-            var args = toolInfo.GetArgumentsOrEmpty();
-            var viewportOnly = args["viewportOnly"]?.ToObject<bool>() ?? false;
-
-            // Collect selected document objects (not just GUIDs) so the viewport pivot check can be applied
-            var selectedObjects = CanvasAccess.GetCurrentObjects()
-                .Where(o => o.Attributes.Selected)
-                .ToList();
-
-            // Restrict to viewport-visible components if requested
-            if (viewportOnly)
-            {
-                var canvas = Instances.ActiveCanvas;
-                if (canvas?.Viewport != null)
+            // Do not pass serialized extension dictionaries or parameter data to the worker.
+            // goinmul: Core 1.1.1 reads component Id/InstanceGuid/Pivot and endpoint Id/ParamIndex only.
+            // Recheck this field set before upgrading GhJSON.Core.
+            return new GhJsonDocument(document.Schema, null,
+                document.Components.Select(component => new GhJsonComponent
                 {
-                    var visibleRegion = canvas.Viewport.VisibleRegion;
-                    selectedObjects = selectedObjects
-                        .Where(o =>
-                        {
-                            var bounds = o.Attributes?.Bounds;
-                            return bounds.HasValue && visibleRegion.IntersectsWith(bounds.Value);
-                        })
-                        .ToList();
+                    Id = component.Id,
+                    InstanceGuid = component.InstanceGuid,
+                    Pivot = component.Pivot == null ? null : new GhJsonPivot { X = component.Pivot.X, Y = component.Pivot.Y },
+                }),
+                document.Connections?.Select(connection => new GhJsonConnection
+                {
+                    From = new GhJsonConnectionEndpoint { Id = connection.From.Id, ParamIndex = connection.From.ParamIndex },
+                    To = new GhJsonConnectionEndpoint { Id = connection.To.Id, ParamIndex = connection.To.ParamIndex },
+                }), null);
+        }
+
+        private static Task<LayoutResult> CalculateLayoutAsync(GhJsonDocument graph, CancellationToken cancellationToken)
+        {
+            return Task.Run(() => GhJSON.Core.GhJson.CalculateLayout(graph, new LayoutOptions
+            {
+                SpacingX = 200f,
+                SpacingY = 100f,
+                IslandSpacingY = 150f,
+            }), cancellationToken);
+        }
+
+        private static Task<T> OnUiThreadAsync<T>(Func<T> action, CancellationToken cancellationToken)
+        {
+            var completion = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+            void Run()
+            {
+                try
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    completion.TrySetResult(action());
+                }
+                catch (Exception ex)
+                {
+                    completion.TrySetException(ex);
                 }
             }
 
-            if (!selectedObjects.Any())
-            {
-                Debug.WriteLine("[GhObjTools] GhTidyUpSelectedAsync: No selected components visible in viewport.");
-                var earlyOutput = new AIReturn() { Request = toolCall };
-                earlyOutput.CreateError("No selected components are visible in the current viewport.");
-                return earlyOutput;
-            }
-
-            // Extract GUIDs after filtering
-            var selectedGuids = selectedObjects.Select(o => o.InstanceGuid.ToString()).ToList();
-
-            // Build forwarding args for the general method
-            var modifiedArgs = new JObject
-            {
-                ["guids"] = JArray.FromObject(selectedGuids),
-                ["viewportOnly"] = viewportOnly,
-            };
-
-            // Preserve optional startPoint parameter if provided
-            if (args["startPoint"] != null)
-            {
-                modifiedArgs["startPoint"] = args["startPoint"];
-            }
-
-            var modifiedToolCall = new AIToolCall
-            {
-                Provider = toolCall.Provider,
-                Model = toolCall.Model,
-                Body = AIBodyBuilder.Create()
-                    .AddToolCall(
-                        id: toolInfo.Id,
-                        name: toolInfo.Name ?? this.toolName,
-                        args: modifiedArgs)
-                    .Build(),
-            };
-
-            modifiedToolCall.SkipMetricsValidation = true;
-
-            // Delegate to the general method
-            return await this.GhTidyUpAsync(modifiedToolCall).ConfigureAwait(false);
+            if (RhinoApp.InvokeRequired) RhinoApp.InvokeOnUiThread((Action)Run);
+            else Run();
+            return completion.Task;
         }
     }
 }

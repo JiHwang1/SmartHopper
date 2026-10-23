@@ -154,6 +154,8 @@ namespace SmartHopper.Components.Test.AiTools
 
             try
             {
+                var startingPivots = selected.Select(item => item.Attributes.Pivot).ToList();
+
                 // Build the targets object: { "<guid>": { "x": ..., "y": ... }, ... }
                 var targetsObj = new JObject();
                 for (int i = 0; i < selected.Count; i++)
@@ -194,6 +196,18 @@ namespace SmartHopper.Components.Test.AiTools
 
                 var updatedArray = toolResult["updated"] as JArray;
                 var updated = updatedArray?.Select(t => t.ToString()).ToList() ?? new List<string>();
+
+                for (int i = 0; i < selected.Count; i++)
+                {
+                    var expectedX = relative ? startingPivots[i].X + xValues[i] : xValues[i];
+                    var expectedY = relative ? startingPivots[i].Y + yValues[i] : yValues[i];
+                    var actual = selected[i].Attributes.Pivot;
+                    if (Math.Abs(actual.X - expectedX) > 0.01 || Math.Abs(actual.Y - expectedY) > 0.01)
+                    {
+                        this.AddRuntimeMessage(GH_RuntimeMessageLevel.Error, "gh_move returned before target positions were applied.");
+                        return;
+                    }
+                }
 
                 DA.SetDataList(0, updated);
             }
