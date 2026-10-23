@@ -205,7 +205,9 @@ namespace SmartHopper.Infrastructure.AICall.Core.Returns
                 }
             }
 
-            if (this.Body == AIBody.Empty && !this.PrivateStructuredMessages.Any())
+            // Empty bodies are independent snapshots; record/reference equality is not
+            // a content check and must not determine whether a response has a payload.
+            if ((this.Body == null || this.Body.InteractionsCount == 0) && !this.PrivateStructuredMessages.Any())
             {
                 errors.Add(new SHRuntimeMessage(SHRuntimeMessageSeverity.Error, SHRuntimeMessageOrigin.Return, SHMessageCode.ReturnInvalid, "Either body or messages must be set"));
             }

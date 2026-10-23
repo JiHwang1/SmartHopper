@@ -308,7 +308,8 @@ namespace SmartHopper.Infrastructure.AICall.Core.Requests
                 cancellationToken.ThrowIfCancellationRequested();
 
                 // Always-on: run request policies before validation/provider call
-                await PolicyPipeline.Default.ApplyRequestPoliciesAsync(this).ConfigureAwait(false);
+                await PolicyPipeline.Default.ApplyRequestPoliciesAsync(this, cancellationToken).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
 
                 // Validate early to avoid provider calls when request is invalid
                 var (rqOk, rqErrors) = this.IsValid();
@@ -366,7 +367,7 @@ namespace SmartHopper.Infrastructure.AICall.Core.Requests
                     /* logging only */
                 }
 
-                await PolicyPipeline.Default.ApplyResponsePoliciesAsync(air).ConfigureAwait(false);
+                await PolicyPipeline.Default.ApplyResponsePoliciesAsync(air, cancellationToken).ConfigureAwait(false);
                 try
                 {
                     Debug.WriteLine($"[AIRequest.Exec] after policies: interactions={air?.Body?.InteractionsCount ?? 0}, new={string.Join(",", air?.Body?.InteractionsNew ?? new System.Collections.Generic.List<int>())}");

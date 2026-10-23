@@ -70,19 +70,6 @@ namespace SmartHopper.Infrastructure.AICall.Validation
             var tool = tools[instance.Name];
             var schemaText = tool.ParametersSchema ?? string.Empty;
 
-            JArray required = null;
-            try
-            {
-                var schemaObj = string.IsNullOrWhiteSpace(schemaText) ? null : JObject.Parse(schemaText);
-                required = schemaObj?["required"] as JArray;
-            }
-            catch
-            {
-                required = null;
-            }
-
-            var hasRequired = required != null && required.Count > 0;
-
             if (string.IsNullOrWhiteSpace(schemaText))
             {
                 // No schema to validate; treat as pass
@@ -91,77 +78,29 @@ namespace SmartHopper.Infrastructure.AICall.Validation
                 return Task.FromResult(ok);
             }
 
-            // Check arguments against schema
-            if (instance.Arguments != null)
+            var createdArguments = instance.Arguments == null;
+            if (createdArguments)
             {
-                var svc = JsonSchemaService.Instance;
-                var json = instance.Arguments.ToString(Formatting.None);
-                if (!svc.Validate(schemaText, json, out string error))
-                {
-                    messages.Add(new SHRuntimeMessage(
-                        SHRuntimeMessageSeverity.Error,
-                        SHRuntimeMessageOrigin.Validation,
-                        SHMessageCode.ToolValidationError,
-                        $"Arguments for tool '{instance.Name}' do not match schema: {error}"));
-                }
-
-                if (hasRequired && instance.Arguments is JObject argsObj)
-                {
-                    var missing = new List<string>();
-                    foreach (var r in required)
-                    {
-                        var key = r?.ToString();
-                        if (string.IsNullOrWhiteSpace(key))
-                        {
-                            continue;
-                        }
-
-                        if (!argsObj.TryGetValue(key, out var value) || value == null || value.Type == JTokenType.Null)
-                        {
-                            missing.Add(key);
-                            continue;
-                        }
-
-                        if (value.Type == JTokenType.String && string.IsNullOrWhiteSpace(value.ToString()))
-                        {
-                            missing.Add(key);
-                        }
-                    }
-
-                    if (missing.Count > 0)
-                    {
-                        messages.Add(new SHRuntimeMessage(
-                            SHRuntimeMessageSeverity.Error,
-                            SHRuntimeMessageOrigin.Validation,
-                            SHMessageCode.ToolValidationError,
-                            $"Arguments for tool '{instance.Name}' are missing required properties: {string.Join(", ", missing)}. Retry the tool call and include these properties."));
-                    }
-                }
-            }
-            else
-            {
-                // If a schema exists but no arguments were provided, initialize to an empty object
-                // so downstream execution receives a valid JSON object. This mirrors permissive
-                // handling for tools that support optional arguments.
+                // Preserve optional-argument normalization, then validate the actual normalized object.
                 instance.Arguments = new JObject();
+            }
 
-                if (hasRequired)
-                {
-                    // Make the message stable and actionable so repeated validation passes dedupe cleanly.
-                    messages.Add(new SHRuntimeMessage(
-                        SHRuntimeMessageSeverity.Error,
-                        SHRuntimeMessageOrigin.Validation,
-                        SHMessageCode.ToolValidationError,
-                        $"Arguments for tool '{instance.Name}' are missing required properties: {string.Join(", ", required)}. Retry the tool call and include these properties."));
-                }
-                else
-                {
-                    messages.Add(new SHRuntimeMessage(
-                        SHRuntimeMessageSeverity.Info,
-                        SHRuntimeMessageOrigin.Validation,
-                        SHMessageCode.ToolValidationError,
-                        $"No arguments provided for tool '{instance.Name}'. Created default empty arguments {{}} to satisfy the schema."));
-                }
+            var json = instance.Arguments.ToString(Formatting.None);
+            if (!JsonSchemaService.Instance.Validate(schemaText, json, out string error))
+            {
+                messages.Add(new SHRuntimeMessage(
+                    SHRuntimeMessageSeverity.Error,
+                    SHRuntimeMessageOrigin.Validation,
+                    SHMessageCode.ToolValidationError,
+                    $"Arguments for tool '{instance.Name}' do not match schema: {error}. Retry the tool call with arguments that satisfy the schema."));
+            }
+            else if (createdArguments)
+            {
+                messages.Add(new SHRuntimeMessage(
+                    SHRuntimeMessageSeverity.Info,
+                    SHRuntimeMessageOrigin.Validation,
+                    SHMessageCode.ToolValidationError,
+                    $"No arguments provided for tool '{instance.Name}'. Created default empty arguments {{}} to satisfy the schema."));
             }
 
             var result = new ValidationResult

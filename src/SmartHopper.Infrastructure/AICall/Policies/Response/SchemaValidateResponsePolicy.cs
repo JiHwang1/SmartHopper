@@ -17,10 +17,11 @@
  */
 
 using System;
-using System.Threading;
+using System.Linq;
 using System.Threading.Tasks;
 using SmartHopper.Infrastructure.AICall.Core.Base;
-using SmartHopper.Infrastructure.AICall.Validation;
+using SmartHopper.Infrastructure.AICall.Core.Interactions;
+using SmartHopper.Infrastructure.AICall.JsonSchemas;
 using SmartHopper.Infrastructure.Diagnostics;
 
 namespace SmartHopper.Infrastructure.AICall.Policies.Response
@@ -30,37 +31,61 @@ namespace SmartHopper.Infrastructure.AICall.Policies.Response
     /// </summary>
     public sealed class SchemaValidateResponsePolicy : IResponsePolicy
     {
-        public async Task ApplyAsync(PolicyContext context)
+        public Task ApplyAsync(PolicyContext context)
         {
             var response = context?.Response;
-            if (response == null)
+            var request = context?.Request;
+            if (response == null || request?.Body?.RequiresJsonOutput != true)
             {
-                return;
+                return Task.CompletedTask;
             }
 
             try
             {
-                var validator = new JsonSchemaResponseValidator();
-                var vctx = Validation.ValidationContext.FromPolicyContext(context);
-                var result = await validator.ValidateAsync(response, vctx, CancellationToken.None).ConfigureAwait(false);
-                if (result?.Messages != null)
+                var schemaText = request.Body.JsonOutputSchema;
+                if (string.IsNullOrWhiteSpace(schemaText)) return Task.CompletedTask;
+
+                var content = response.Body?.Interactions?
+                    .OfType<AIInteractionText>()
+                    .Where(i => i.Agent == AIAgent.Assistant)
+                    .Select(i => i.Content)
+                    .LastOrDefault(c => !string.IsNullOrWhiteSpace(c));
+                if (string.IsNullOrWhiteSpace(content))
                 {
-                    foreach (var m in result.Messages)
-                    {
-                        if (m != null)
-                        {
-                            response.AddRuntimeMessage(m.Severity, m.Origin, m.Message);
-                        }
-                    }
+                    response.AddRuntimeMessage(
+                        SHRuntimeMessageSeverity.Error,
+                        SHRuntimeMessageOrigin.Validation,
+                        "Expected JSON structured output from assistant, but content is missing");
+                    return Task.CompletedTask;
                 }
+
+                var svc = JsonSchemaService.Instance;
+                // Mappers may already have unwrapped the response. Validate it before extraction.
+                if (svc.Validate(schemaText, content, out string error)) return Task.CompletedTask;
+
+                // Derive metadata from this request, rather than relying on AsyncLocal writes in
+                // another execution context or metadata left by a previous request.
+                if (svc.TryParseSchema(schemaText, out var schema, out _))
+                {
+                    var (_, info) = svc.WrapForProvider(schema, request.Provider);
+                    var unwrapped = svc.Unwrap(content, info);
+                    if (unwrapped != content && svc.Validate(schemaText, unwrapped, out error)) return Task.CompletedTask;
+                }
+
+                response.AddRuntimeMessage(
+                    SHRuntimeMessageSeverity.Error,
+                    SHRuntimeMessageOrigin.Validation,
+                    $"Response JSON does not match schema: {error}");
             }
             catch (Exception ex)
             {
                 response.AddRuntimeMessage(
-                    SHRuntimeMessageSeverity.Warning,
+                    SHRuntimeMessageSeverity.Error,
                     SHRuntimeMessageOrigin.Validation,
                     $"Schema response validation failed: {ex.Message}");
             }
+
+            return Task.CompletedTask;
         }
     }
 }

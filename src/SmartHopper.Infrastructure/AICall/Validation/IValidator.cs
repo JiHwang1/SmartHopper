@@ -66,6 +66,7 @@ namespace SmartHopper.Infrastructure.AICall.Validation
         /// <summary>
         /// Optional structured issues including codes and JSON-like path hints.
         /// </summary>
+        [System.Obsolete("Reserved compatibility member; built-in validators report Messages.")]
         public List<ValidationIssue> Issues { get; set; } = new List<ValidationIssue>();
 
         /// <summary>
@@ -86,6 +87,7 @@ namespace SmartHopper.Infrastructure.AICall.Validation
         /// <summary>
         /// Gets a value indicating whether messages have been sanitized to avoid PII leakage.
         /// </summary>
+        [System.Obsolete("Reserved compatibility member; it does not enforce message sanitization.")]
         public bool MessagesSanitized { get; set; }
 
         /// <summary>

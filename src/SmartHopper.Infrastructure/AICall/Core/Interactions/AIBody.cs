@@ -26,9 +26,9 @@ using SmartHopper.Infrastructure.Diagnostics;
 namespace SmartHopper.Infrastructure.AICall.Core.Interactions
 {
     /// <summary>
-    /// Immutable representation of an AI request body.
-    /// - No implicit side effects or dynamic context injection
-    /// - Suitable for stable hashing/fingerprints
+    /// Container snapshot of an AI request body. Interaction objects and legacy newness
+    /// markers remain mutable; this type does not provide deep immutability or isolation
+    /// between concurrent consumers. No dynamic context injection is performed here.
     /// Construct via <see cref="AIBodyBuilder"/>.
     /// </summary>
     public sealed record AIBody(
@@ -39,9 +39,9 @@ namespace SmartHopper.Infrastructure.AICall.Core.Interactions
         List<int> InteractionsNew)
     {
         /// <summary>
-        /// Gets an empty immutable body with defaults: ToolFilter="-*", ContextFilter="-*".
+        /// Gets an empty body with independent mutable newness markers.
         /// </summary>
-        public static AIBody Empty { get; } = new (
+        public static AIBody Empty => new (
             Array.Empty<IAIInteraction>(),
             "-*",
             "-*",

@@ -17,6 +17,7 @@
  */
 
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 using SmartHopper.Infrastructure.AICall.Core.Base;
@@ -35,6 +36,8 @@ namespace SmartHopper.Infrastructure.AICall.Policies.Request
         public Task ApplyAsync(PolicyContext context)
         {
             var rq = context?.Request;
+            var svc = JsonSchemaService.Instance;
+            svc.SetCurrentWrapperInfo(null);
             if (rq?.Body == null)
             {
                 return Task.CompletedTask;
@@ -53,16 +56,11 @@ namespace SmartHopper.Infrastructure.AICall.Policies.Request
                 return Task.CompletedTask;
             }
 
-            var svc = JsonSchemaService.Instance;
             try
             {
                 if (!svc.TryParseSchema(schemaText, out JObject schemaObj, out string parseError))
                 {
-                    context?.Diagnostics?.Add(new SHRuntimeMessage(
-                        SHRuntimeMessageSeverity.Error,
-                        SHRuntimeMessageOrigin.Validation,
-                        SHMessageCode.BodyInvalid,
-                        $"Invalid JSON output schema: {parseError}"));
+                    RecordError(context, $"Invalid JSON output schema: {parseError}");
                     return Task.CompletedTask;
                 }
 
@@ -73,14 +71,24 @@ namespace SmartHopper.Infrastructure.AICall.Policies.Request
             }
             catch (Exception ex)
             {
-                context?.Diagnostics?.Add(new SHRuntimeMessage(
-                    SHRuntimeMessageSeverity.Warning,
-                    SHRuntimeMessageOrigin.Validation,
-                    SHMessageCode.BodyInvalid,
-                    $"Schema validation setup failed: {ex.Message}"));
+                RecordError(context, $"Schema validation setup failed: {ex.Message}");
             }
 
             return Task.CompletedTask;
+        }
+
+        private static void RecordError(PolicyContext context, string message)
+        {
+            var diagnostic = new SHRuntimeMessage(
+                SHRuntimeMessageSeverity.Error,
+                SHRuntimeMessageOrigin.Validation,
+                SHMessageCode.BodyInvalid,
+                message);
+            context.Diagnostics.Add(diagnostic);
+            // PolicyContext diagnostics alone are not propagated by the pipeline.
+            var messages = new List<SHRuntimeMessage>(context.Request.Messages ?? new List<SHRuntimeMessage>());
+            messages.Add(diagnostic);
+            context.Request.Messages = messages;
         }
     }
 }

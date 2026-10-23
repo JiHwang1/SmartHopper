@@ -29,8 +29,8 @@ using SmartHopper.Infrastructure.Diagnostics;
 namespace SmartHopper.Infrastructure.AICall.Core.Interactions
 {
     /// <summary>
-    /// Fluent builder for <see cref="AIBody"/>. Produces immutable instances without
-    /// implicit context injection or side effects.
+    /// Fluent builder for <see cref="AIBody"/>. Copies the interaction container and
+    /// newness markers; interaction objects remain shared for compatibility.
     /// </summary>
     public sealed class AIBodyBuilder
     {
@@ -941,7 +941,8 @@ namespace SmartHopper.Infrastructure.AICall.Core.Interactions
         }
 
         /// <summary>
-        /// Builds an immutable <see cref="AIBody"/> snapshot from the current builder state.
+        /// Builds a container snapshot. Interaction objects remain shared; consumers
+        /// must coordinate mutations instead of treating this as a deep immutable copy.
         /// </summary>
         public AIBody Build()
         {
@@ -972,7 +973,7 @@ namespace SmartHopper.Infrastructure.AICall.Core.Interactions
                 /* logging only */
             }
 
-            return new AIBody(snapshot, this.toolFilter, this.contextFilter, this.jsonOutputSchema, newIndices);
+            return new AIBody(Array.AsReadOnly(snapshot), this.toolFilter, this.contextFilter, this.jsonOutputSchema, newIndices);
         }
 
         private void EnsureTurnId(IAIInteraction interaction)

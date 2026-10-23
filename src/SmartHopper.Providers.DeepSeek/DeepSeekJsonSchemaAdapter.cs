@@ -16,7 +16,6 @@
  * along with this library; if not, see <https://www.gnu.org/licenses/lgpl-3.0.html>.
  */
 
-using System;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
 using Newtonsoft.Json.Linq;
@@ -40,52 +39,9 @@ namespace SmartHopper.Providers.DeepSeek
 
         public (JObject wrapped, SchemaWrapperInfo info) Wrap(JObject schema)
         {
-            if (schema is null)
-            {
-                throw new ArgumentNullException(nameof(schema));
-            }
-
-            var schemaType = schema["type"]?.ToString();
-
-            // DeepSeek also behaves better with object-root schemas
-            if (string.Equals(schemaType, "object", StringComparison.OrdinalIgnoreCase))
-            {
-                return (schema, new SchemaWrapperInfo { IsWrapped = false, ProviderName = this.ProviderName });
-            }
-
-            if (string.Equals(schemaType, "array", StringComparison.OrdinalIgnoreCase))
-            {
-                var wrapped = new JObject
-                {
-                    ["type"] = "object",
-                    ["properties"] = new JObject { ["items"] = schema },
-                    ["required"] = new JArray { "items" },
-                    ["additionalProperties"] = false,
-                };
-                return (wrapped, new SchemaWrapperInfo { IsWrapped = true, WrapperType = "array", PropertyName = "items", ProviderName = this.ProviderName });
-            }
-
-            if (schemaType == "string" || schemaType == "number" || schemaType == "integer" || schemaType == "boolean")
-            {
-                var wrapped = new JObject
-                {
-                    ["type"] = "object",
-                    ["properties"] = new JObject { ["value"] = schema },
-                    ["required"] = new JArray { "value" },
-                    ["additionalProperties"] = false,
-                };
-                return (wrapped, new SchemaWrapperInfo { IsWrapped = true, WrapperType = schemaType ?? "primitive", PropertyName = "value", ProviderName = this.ProviderName });
-            }
-
-            // Unknown type: wrap under data
-            var generic = new JObject
-            {
-                ["type"] = "object",
-                ["properties"] = new JObject { ["data"] = schema },
-                ["required"] = new JArray { "data" },
-                ["additionalProperties"] = false,
-            };
-            return (generic, new SchemaWrapperInfo { IsWrapped = true, WrapperType = "unknown", PropertyName = "data", ProviderName = this.ProviderName });
+            var result = JsonSchemaAdapterRegistry.Default.Wrap(schema);
+            result.info.ProviderName = this.ProviderName;
+            return result;
         }
 
         public string Unwrap(string content, SchemaWrapperInfo info)

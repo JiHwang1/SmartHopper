@@ -22,12 +22,12 @@ namespace SmartHopper.Infrastructure.AICall.JsonSchemas
 {
     /// <summary>
     /// Centralized service for handling JSON schema wrapping, unwrapping and validation.
-    /// Thread-safe and provider-aware. Keeps ephemeral wrapper info in thread-local context.
+    /// Provider-aware. Keeps ephemeral wrapper info in the current asynchronous execution context.
     /// </summary>
     public interface IJsonSchemaService
     {
         /// <summary>
-        /// Attempts to parse the schema text into a JObject.
+        /// Validates the schema definition and parses an object-root schema into a JObject.
         /// </summary>
         /// <param name="schemaJson">Raw schema JSON text.</param>
         /// <param name="schema">Parsed schema JObject on success.</param>
@@ -54,7 +54,8 @@ namespace SmartHopper.Infrastructure.AICall.JsonSchemas
 
         /// <summary>
         /// Validates a JSON instance string against a schema string.
-        /// Lightweight: currently performs parse checks only (no full JSON Schema validation).
+        /// Evaluates JSON Schema constraints using the declared dialect, or draft 2020-12 by default.
+        /// Schema definitions are validated first; unresolved external references are never downloaded.
         /// </summary>
         /// <param name="schemaJson">JSON schema string.</param>
         /// <param name="json">JSON instance string.</param>
@@ -63,13 +64,14 @@ namespace SmartHopper.Infrastructure.AICall.JsonSchemas
         bool Validate(string schemaJson, string json, out string error);
 
         /// <summary>
-        /// Sets the current thread's wrapper info so response mappers can unwrap consistently.
+        /// Sets wrapper info in the current asynchronous execution context.
+        /// Assignments made in a child execution context do not flow back to its caller.
         /// </summary>
         /// <param name="info">Wrapper info.</param>
         void SetCurrentWrapperInfo(SchemaWrapperInfo info);
 
         /// <summary>
-        /// Gets the current thread's wrapper info, if any.
+        /// Gets wrapper info from the current asynchronous execution context, if any.
         /// </summary>
         /// <returns>Wrapper info or null.</returns>
         SchemaWrapperInfo GetCurrentWrapperInfo();

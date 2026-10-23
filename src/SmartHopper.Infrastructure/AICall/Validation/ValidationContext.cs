@@ -72,16 +72,19 @@ namespace SmartHopper.Infrastructure.AICall.Validation
         /// <summary>
         /// Optional body fingerprint for cache/memoization correlation.
         /// </summary>
+        [Obsolete("Reserved compatibility member; not used by the built-in validators.")]
         public string BodyFingerprint { get; init; }
 
         /// <summary>
         /// Feature flags to enable/disable behaviors.
         /// </summary>
+        [Obsolete("Reserved compatibility member; not used by the built-in validators.")]
         public HashSet<string> FeatureFlags { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// Strictness mode to use for gating (default: ErrorOnly).
         /// </summary>
+        [Obsolete("Not used by built-in validators; use each validator's FailOn threshold.")]
         public ValidationStrictness Strictness { get; init; } = ValidationStrictness.ErrorOnly;
 
         public static ValidationContext FromPolicyContext(Policies.PolicyContext pc)
