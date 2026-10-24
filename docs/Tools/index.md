@@ -41,9 +41,10 @@ Tools are discrete operations with JSON-schema-defined inputs that the AI can in
 ### When to Use Them
 
 - **Text tasks**: Use `text2text`, `text2boolean`, `text2textlist`, `text2json`
-- **Image tasks**: Use `img2text` (vision) or `text2img` (generation)
-- **Document tasks**: Use `file2md` or `web2md` to convert documents and web pages to Markdown
-- **Canvas tasks**: Use `gh_get`, `gh_put`, `gh_move`, `gh_group`, `gh_tidy_up`, `gh_connect`, `gh_disconnect` for Grasshopper automation
+ - **Image & Visual tasks**: Use `img2text` (vision), `text2img` (generation), `canvas_screenshot`, and `viewport_screenshot`
+ - **Document & Knowledge tasks**: Use `file2md` or `web2md` to convert documents and web pages to Markdown, and `gh_document_*` to manage open definitions
+ - **Canvas tasks**: Use `gh_get` (queries with projection/summary), `gh_put`, `gh_move`, `gh_group`, `gh_tidy_up`, `gh_connect`, `gh_disconnect`, `gh_set_value`, `gh_run` with review approval gates
+ - **Planning tasks**: Use `plan_propose` and `plan_tasks` to structure multi-step workflows
 - **Knowledge tasks**: Use `smarthopper_readme`, `smarthopper_tool_help`, `mcneel_forum_search` for contextual guidance
 
 ### Visual Guide
@@ -180,12 +181,14 @@ Component → AIToolRequest → ToolManager → Provider formatting → AI Model
 | --- | --- |
 | Instruction & Knowledge | `smarthopper_readme`, `smarthopper_workflows`, `smarthopper_tool_help`, `file2md`, `web2md`, `mcneel_forum_search`, `mcneel_forum_topic`, `mcneel_forum_post` |
 | Text Generation | `text2text`, `text2boolean`, `text2textlist`, `text2json`, `list_filter`, `textlist2boolean` |
-| Image Processing | `img2text`, `text2img` |
-| Grasshopper Canvas | `gh_get`, `gh_put`, `gh_move`, `gh_merge`, `gh_group`, `gh_tidy_up`, `gh_list_categories`, `gh_list_components`, `gh_component_preview`, `gh_component_lock`, `gh_connect`, `gh_disconnect` |
+| Image Processing | `img2text`, `text2img`, `canvas_screenshot`, `viewport_screenshot` |
+| Grasshopper Canvas | `gh_get`, `gh_put`, `gh_move`, `gh_merge`, `gh_group`, `gh_tidy_up`, `gh_list_categories`, `gh_list_components`, `gh_component_preview`, `gh_component_lock`, `gh_connect`, `gh_disconnect`, `gh_set_value`, `gh_run`, `gh_document_list`, `gh_document_read`, `gh_document_switch`, `gh_document_new`, `gh_document_open`, `gh_document_save` |
+| Planning | `plan_propose`, `plan_tasks` |
 | Scripting | `script_generate`, `script_edit`, `script_review` |
 
 ### Related Documentation
 
+- [Canvas and Conversation Tools](./canvas-and-conversation-tools.md)
 - [ToolResultEnvelope](./ToolResultEnvelope.md)
 - [img2text Tool](./img2text.md)
 - [smarthopper_readme Tool](./smarthopper_readme.md)

@@ -11,8 +11,8 @@ SmartHopper is an AI-powered plugin for Grasshopper 3D. This documentation cover
 | Property | Value |
 | --- | --- |
 | **Source Code** | `N/A` |
-| **Since Version** | ? |
-| **Last Updated** | 2026-06-14 |
+| **Since Version** | 2.0.0 |
+| **Last Updated** | 2026-10-24 |
 | **Documentation Maintainer** | Devin AI |
 
 _Note: This documentation was written by AI on its own. It may contain some mistakes. If you would like to help, read this documentation and delete this comment if everything is okay._
@@ -66,6 +66,7 @@ This is the root documentation hub for SmartHopper. It organizes all guides, ref
 #### Architecture
 
 - [Architecture Overview](Architecture.md) -- system design
+- [MCP Server](Architecture/mcp-server.md) -- loopback Model Context Protocol server
 - [AIInputPayload](Architecture/AIInputPayload.md) -- unified input format
 - [AIRequestParameters](Architecture/AIRequestParameters.md) -- request customization
 - [VersatileAudio](Architecture/VersatileAudio.md) -- audio type system
@@ -75,6 +76,7 @@ This is the root documentation hub for SmartHopper. It organizes all guides, ref
 
 - [Context Providers](Context/index.md) -- environment, time, and file context
 - [AI Tools](Tools/index.md) -- Grasshopper canvas utilities for AI
+- [Canvas and Conversation Tools](Tools/canvas-and-conversation-tools.md) -- reviewed edits, document tools, screenshots, budgets
 
 #### UI
 

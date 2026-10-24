@@ -9,8 +9,8 @@ Loopback-only MCP transport that exposes SmartHopper's existing `AITool` catalog
 | Property | Value |
 | --- | --- |
 | **Source Code** | `src/SmartHopper.Infrastructure/Mcp/` |
-| **Since Version** | ? |
-| **Last Updated** | 2026-07-04 |
+| **Since Version** | 2.0.0 |
+| **Last Updated** | 2026-10-24 |
 | **Documentation Maintainer** | Devin AI |
 
 _Note: This documentation was written by AI on its own. It may contain some mistakes. If you would like to help, read this documentation and delete this comment if everything is okay._
@@ -99,7 +99,10 @@ MCP and the Codex app-server client use the shared `JsonRpcEnvelope` helper for 
 | `tools/call` | Resolves the named tool, builds `AIToolCall`, executes it through the adapter, and wraps the result in MCP `text` content. |
 | `notifications/initialized` | Acknowledged as a notification. |
 | `ping` | Lightweight health check. |
-| `resources/*` and `prompts/*` | Reserved for later phases. |
+| `resources/list` | Returns embedded knowledge documents from registered `IMcpResourceProvider` implementations. |
+| `resources/read` | Reads embedded knowledge content by URI (e.g., `smarthopper://knowledge/{name}`). |
+| `prompts/list` | Returns available prompts from registered `IMcpPromptProvider` implementations. |
+| `prompts/get` | Resolves prompt arguments and returns prompt messages. |
 | `GET /health` | HTTP-only endpoint returning `{"status":"ok"}`; not a JSON-RPC method. |
 
 ### Tool Metadata
@@ -119,6 +122,18 @@ Two self-documenting tools help clients discover the surface:
 - `smarthopper_readme` — returns topic-based operational instructions (renamed from `instruction_get`).
 - `smarthopper_workflows` — returns canonical tool chains for common tasks.
 - `smarthopper_tool_help` — returns metadata for a specific tool by name.
+
+### Embedded Knowledge Resources and Prompts
+
+SmartHopper exposes embedded domain knowledge and prompt templates over MCP via `JsonRpcDispatcher`:
+
+- **Knowledge Resources (`resources/list`, `resources/read`)**:
+  - Served from embedded assembly resources under `src/SmartHopper.Infrastructure/Resources/Mcp/Docs/` via `StaticMcpResourceProvider` and `EmbeddedMcpResourceLoader`.
+  - 16 curated documents: `grasshopper-data-trees`, `grasshopper-debugging`, `grasshopper-definition-design`, `grasshopper-foundations`, `grasshopper-geometry`, `grasshopper-performance`, `grasshopper-scripting-csharp`, `grasshopper-scripting-python`, `grasshopper-scripting-vb`, `smarthopper-ghjson`, `smarthopper-providers`, `smarthopper-readme`, `smarthopper-research`, `smarthopper-tool-strategy`, `smarthopper-workflows`, `source-policy`.
+  - Identified by URI scheme `smarthopper://knowledge/{name}` with mimeType `text/markdown`.
+- **Prompt Templates (`prompts/list`, `prompts/get`)**:
+  - Served via `StaticMcpPromptProvider` from embedded prompts under `src/SmartHopper.Infrastructure/Resources/Mcp/Prompts/`.
+  - 5 specialized prompts: `grasshopper-expert`, `script-writer`, `canvas-debugger`, `definition-builder`, and `performance-reviewer`.
 
 ### `tools/call` Payload Contract
 
@@ -223,6 +238,11 @@ Phase 1 is implemented under `src/SmartHopper.Infrastructure/Mcp/` rather than a
 - `McpServerOptions.cs` — port, token, allow-list, and mutating-tool settings
 - `McpServerLifecycle.cs` — ref-counted singleton server manager
 - `McpToolDescriptor.cs` / `McpToolCallResult.cs` — protocol DTOs
+- `AgentKnowledgeCatalog.cs` / `AgentKnowledgeDocument.cs` — embedded knowledge catalog and document metadata
+- `EmbeddedMcpResourceLoader.cs` — embedded markdown resource loader
+- `IMcpResourceProvider.cs` / `StaticMcpResourceProvider.cs` — resource provider contracts and static provider
+- `IMcpPromptProvider.cs` / `StaticMcpPromptProvider.cs` — prompt provider contracts and static prompt catalog
+- `McpResource.cs` / `McpPrompt.cs` / `McpPromptMessage.cs` — protocol DTOs for resources and prompts
 
 The component entry point lives in `src/SmartHopper.Components/Mcp/SmartHopperMcpServerComponent.cs`.
 
@@ -232,8 +252,8 @@ The component entry point lives in `src/SmartHopper.Components/Mcp/SmartHopperMc
 | --- | --- | --- |
 | 0 | Design doc | No code. |
 | 1 | Transport and tool bridge | Loopback server, `tools/list`, `tools/call`, read-only tools by default. |
-| 2 | Resources | `resources/list`, `resources/read`, embedded docs. |
-| 3 | Prompts | `prompts/list`, `prompts/get`. |
+| 2 | Resources | `resources/list`, `resources/read`, embedded knowledge resources. *(Completed)* |
+| 3 | Prompts | `prompts/list`, `prompts/get`, reusable prompt templates. *(Completed)* |
 | 4 | LAN exposure and stronger auth | Opt-in networking and stricter security. |
 | 5 | Streamable HTTP / SSE | Long-running streaming transport support. |
 

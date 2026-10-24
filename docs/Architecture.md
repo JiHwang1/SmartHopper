@@ -9,8 +9,8 @@ A modular, secure AI layer integrated into Grasshopper 3D, connecting parametric
 | Property | Value |
 | --- | --- |
 | **Source Code** | `N/A` |
-| **Since Version** | ? |
-| **Last Updated** | 2026-06-14 |
+| **Since Version** | 2.0.0 |
+| **Last Updated** | 2026-10-24 |
 | **Documentation Maintainer** | Devin AI |
 
 _Note: This documentation was written by AI on its own. It may contain some mistakes. If you would like to help, read this documentation and delete this comment if everything is okay._
@@ -72,10 +72,10 @@ SmartHopper discovers provider plugins automatically. Each provider must be digi
 
 | Project | Purpose |
 | --- | --- |
-| `SmartHopper.Core` | Core abstractions shared across components |
-| `SmartHopper.Core.Grasshopper` | Grasshopper utilities and AI Tools |
-| `SmartHopper.Components` | End-user Grasshopper components |
-| `SmartHopper.Infrastructure` | Settings, Provider/Model managers, Context, AI call pipeline |
+| `SmartHopper.Core` | Core abstractions, WebChat UI, task planning, and visual context providers |
+| `SmartHopper.Core.Grasshopper` | Grasshopper utilities, AI Tools, Canvas review system, multi-document access, and Undo management |
+| `SmartHopper.Components` | End-user Grasshopper components (Input, Output, Text, Img, JSON, Knowledge, Audio, Mcp) |
+| `SmartHopper.Infrastructure` | Settings, Provider/Model managers, Context, AI call pipeline, Consent gates, Run budgets, and MCP server |
 | `SmartHopper.Providers.*` | Provider plugins (external DLLs, loaded securely) |
 
 - **Target platforms**: Rhino 8 (Grasshopper 1)
@@ -151,6 +151,7 @@ Context is injected into AI prompts via `IAIContextProvider` implementations:
 | `EnvironmentContextProvider` | `SmartHopper.Core` | OS, Rhino version, platform |
 | `TimeContextProvider` | `SmartHopper.Core` | Current time and timezone |
 | `FileContextProvider` | `SmartHopper.Core` | Current file, selection, object counts |
+| `CanvasVisualContextProviders` | `SmartHopper.Core` | Canvas and viewport screenshot images, camera projection, and units metadata |
 
 ### Execution Pipeline
 
@@ -214,6 +215,9 @@ SmartHopper integrates with external AI providers through a secure plug-in model
 - Components maintain run state and metrics; the async bases ensure metrics are not cleared mid-processing in toggle scenarios.
 - The AICall `PolicyPipeline` runs request/response policies (timeouts, tool validation, context injection, schema attach/validate, finish-reason normalization) for every call.
 - Conversation sessions (`ConversationSession`) orchestrate multi-turn calls and tool loops on top of `AIRequestCall.Exec`, aggregating per-turn metrics for the UI.
+- Conversation recovery restores interrupted multi-turn tool calling without replaying mutations; run budgets enforce per-turn execution limits on wall-clock time and token consumption.
+- Canvas mutation tools pass through `ConsentGate` and `CanvasChangeReviewService`, requiring review confirmation and grouping operations in transactional `CanvasUndoBatch` records.
+- Modality fallback chains (`FallbackChain.BoundSteps`) preserve resolved providers/models when converting between modalities (e.g. speech, transcription, chat audio).
 - Providers should implement timeouts, retries with jitter, cancellation, and error classification.
 
 ### Design Decisions
@@ -235,10 +239,12 @@ src/
 ├── SmartHopper.Core/
 │   ├── ComponentBase/        -- Component hierarchy bases
 │   ├── AIContext/             -- Context providers (Environment, Time)
+│   ├── UI/Chat/              -- WebChat dialog, DOMPurify security, Task plans, Document tracking
 │   ├── IO/                   -- File I/O and serialization
 │   └── Types/                -- Core type definitions
 ├── SmartHopper.Core.Grasshopper/
-│   └── AITools/              -- AI tools (gh_*, text_*, list_*, script_*, img_*, web_*)
+│   ├── AITools/              -- AI tools (gh_*, text_*, list_*, script_*, img_*, web_*, plan_*, screenshots)
+│   └── Utils/Canvas/         -- Canvas change review, preview overlay, document tracking, and Undo batches
 ├── SmartHopper.Components/
 │   ├── Input/                -- Input adapter components
 │   ├── Output/               -- Output adapter components
@@ -248,6 +254,7 @@ src/
 │   ├── Knowledge/            -- File/web/forum knowledge extraction
 │   ├── Grasshopper/          -- GH definition manipulation
 │   ├── Audio/                -- Audio playback/visualization
+│   ├── Mcp/                  -- Loopback MCP server component
 │   ├── Modifiers/            -- Script and parameter modifiers
 │   └── Misc/                 -- Metrics deconstruction
 ├── SmartHopper.Infrastructure/
@@ -256,7 +263,11 @@ src/
 │   ├── AIContext/            -- Context manager, bootstrapper
 │   ├── AICall/               -- AI call pipeline, policies, tools
 │   │   ├── Core/             -- AIBody, AIRequest, AIReturn, AIMetrics
+│   │   ├── Consent/          -- Consent gate, mutating operation executor, plan consent
+│   │   ├── Fallback/         -- Modality fallback resolver, bound steps
+│   │   ├── Sessions/         -- Conversation session, recovery, run budget
 │   │   └── Tools/            -- Tool result envelope
+│   ├── Mcp/                  -- Loopback MCP server, JSON-RPC dispatcher, resource & prompt providers
 │   ├── Diagnostics/          -- Logging and tracing
 │   └── Streaming/            -- Streaming response handling
 └── SmartHopper.Providers.*/  -- External provider plugins
@@ -265,6 +276,8 @@ src/
 
 ### Related Documentation
 
+- [Canvas and Conversation Tools](./Tools/canvas-and-conversation-tools.md) -- reviewed edits, document tools, screenshots, budgets
+- [MCP Server](./Architecture/mcp-server.md) -- loopback Model Context Protocol server, embedded knowledge, and prompts
 - [Design Decisions](./DESIGN_DECISIONS/index.md) -- rationale behind key choices
 - [AI Call Pipeline](./Providers/AICall/index.md) -- request/response processing
 - [ComponentBase](./Components/ComponentBase/index.md) -- component hierarchy

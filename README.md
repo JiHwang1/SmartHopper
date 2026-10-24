@@ -20,7 +20,10 @@
 SmartHopper brings a context‑aware AI assistant and a suite of AI‑powered components into Grasshopper3D.
 
 - 💬 **Canvas assistant**
-  An on‑canvas AI chat truly aware of your components and connected to the McNeel forum for real answers.
+  An on‑canvas AI chat truly aware of your components, with visual context (canvas/viewport screenshots), task planning, multi-document awareness, and reviewed canvas modifications with Undo protection.
+
+- 🔌 **Model Context Protocol (MCP)**
+  An embedded loopback MCP server exposing Grasshopper inspection tools, canvas manipulation, embedded knowledge documents, and reusable prompts to external MCP clients.
 
 - 📝 **Script generator**
   Get help creating, editing and fixing Script components in Python, IronPython, C#, and VB<span>.NET</span>.

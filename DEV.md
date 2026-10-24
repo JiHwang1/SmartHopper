@@ -22,8 +22,15 @@ This document aggregates development-facing information.
 | Tidy Up (GhTidyUp)<br><sub>Organize selected components into a tidy grid layout based on dependencies.</sub> | Grasshopper | ⚪ | 🟡 | 🟠 | 🟢 |
 | AI GroupTitle (AIGroupTitle)<br><sub>Group components and set a meaningful title to the group</sub> | Grasshopper | ⚪ | - | - | - |
 | AI Grasshopper Generate (AIGhGenerate)<br><sub>Automatically generate Grasshopper definitions using AI</sub> | Grasshopper | ⚪ | - | - | - |
-| Save GhJSON file (SaveGhJSON)<br><sub>Save the current Grasshopper file as a GhJSON format</sub> | Grasshopper | ⚪ | - | - | - |
-| Load GhJSON file (LoadGhJSON)<br><sub>Load a GhJSON file and convert it to a Grasshopper document</sub> | Grasshopper | ⚪ | - | - | - |
+| Save GhJSON file (SaveGhJSON)<br><sub>Save the current Grasshopper file as a GhJSON format</sub> | Grasshopper | ⚪ | 🟡 | 🟠 | 🟢 |
+| Load GhJSON file (LoadGhJSON)<br><sub>Load a GhJSON file and convert it to a Grasshopper document</sub> | Grasshopper | ⚪ | 🟡 | 🟠 | 🟢 |
+| Diff GhJSON (GhDiff)<br><sub>Diff two GhJSON documents and produce a structured .ghpatch document</sub> | Grasshopper | ⚪ | 🟡 | 🟠 | 🟢 |
+| Apply GhPatch (GhPatchApply)<br><sub>Apply a .ghpatch document to a base GhJSON document</sub> | Grasshopper | ⚪ | 🟡 | 🟠 | 🟢 |
+| Apply GhPatch To Canvas (GhPatchApplyToCanvas)<br><sub>Apply a .ghpatch document directly to the active Grasshopper canvas</sub> | Grasshopper | ⚪ | 🟡 | 🟠 | 🟢 |
+| Validate GhPatch (GhValidate)<br><sub>Validate a .ghpatch document structurally and check checksums</sub> | Grasshopper | ⚪ | 🟡 | 🟠 | 🟢 |
+| Save GhPatch file (SaveGhPatch)<br><sub>Save a .ghpatch document to a file</sub> | Grasshopper | ⚪ | 🟡 | 🟠 | 🟢 |
+| Load GhPatch file (OpenGhPatch)<br><sub>Load a .ghpatch document from a file</sub> | Grasshopper | ⚪ | 🟡 | 🟠 | 🟢 |
+| MCP Server (SmartHopperMcpServer)<br><sub>Start an embedded loopback MCP server exposing tools, knowledge resources, and prompts</sub> | Mcp | ⚪ | 🟡 | 🟠 | 🟢 |
 | AI Chat (AIChat)<br><sub>Interactive AI-powered conversational interface with tool calling</sub> | AI | ⚪ | 🟡 | 🟠 | 🟢 |
 | AI File Context (AIFileContext)<br><sub>Set a context for the current document</sub> | AI | ⚪ | 🟡 | 🟠 | 🟢 |
 | AI Models (AIModels)<br><sub>Retrieve the list of available models from the selected AI provider</sub> | AI | ⚪ | 🟡 | 🟠 | 🟢 |
@@ -56,17 +63,21 @@ This document aggregates development-facing information.
 | AI Ladybug Forum Post Summarize (AILadybugForumPostSummarize)<br><sub>Generate AI summary of a Ladybug forum post</sub> | Knowledge | ⚪ | 🟡 | 🟠 | 🟢 |
 | AI Ladybug Forum Topic Summarize (AILadybugForumTopicSummarize)<br><sub>Generate AI summary of a Ladybug forum topic</sub> | Knowledge | ⚪ | 🟡 | 🟠 | 🟢 |
 | Deconstruct Metrics (DeconstructMetrics)<br><sub>Break down the usage metrics into individual values</sub> | Misc | ⚪ | 🟡 | 🟠 | 🟢 |
-| AI Text To JSON (AIText2Json)<br><sub>Generate structured JSON from a prompt using AI with JSON Schema validation</sub> | JSON | ⚪ | 🟡 | - | - |
-| JSON Schema (JsonSchema)<br><sub>Build a JSON Schema from property definitions with nested object/array support via dot-notation</sub> | JSON | ⚪ | 🟡 | - | - |
-| JSON Schema Property (JsonSchemaProp)<br><sub>Build scalar property definitions for JSON Schema using individual inputs</sub> | JSON | ⚪ | 🟡 | - | - |
-| JSON Schema Property Object (JsonSchemaPropObj)<br><sub>Build object property definitions with sub-properties for JSON Schema</sub> | JSON | ⚪ | 🟡 | - | - |
-| JSON Schema Property Array (JsonSchemaPropArr)<br><sub>Build array property definitions with configurable item type for JSON Schema</sub> | JSON | ⚪ | 🟡 | - | - |
-| JSON Object (JsonObject)<br><sub>Create a JSON object from key-value pairs with auto-coerced values</sub> | JSON | ⚪ | 🟡 | - | - |
-| JSON Array (JsonArray)<br><sub>Create a JSON array from a list of items with auto-coerced values</sub> | JSON | ⚪ | 🟡 | - | - |
-| JSON Array To Text List (JsonArray2Text)<br><sub>Parse a JSON array string into a Grasshopper text list</sub> | JSON | ⚪ | 🟡 | - | - |
-| JSON To Text (Json2Text)<br><sub>Serialize a JSON value to a string with optional pretty-print</sub> | JSON | ⚪ | 🟡 | - | - |
-| JSON Get Value (JsonGetValue)<br><sub>Extract a nested value from JSON using dot-notation path</sub> | JSON | ⚪ | 🟡 | - | - |
-| JSON Merge (JsonMerge)<br><sub>Merge multiple JSON objects via shallow merge (last-wins)</sub> | JSON | ⚪ | 🟡 | - | - |
+| AI Text To JSON (AIText2Json)<br><sub>Generate structured JSON from a prompt using AI with JSON Schema validation</sub> | JSON | ⚪ | 🟡 | 🟠 | 🟢 |
+| JSON Schema (JsonSchema)<br><sub>Build a JSON Schema from property definitions with nested object/array support via dot-notation</sub> | JSON | ⚪ | 🟡 | 🟠 | 🟢 |
+| JSON Schema Property (JsonSchemaProp)<br><sub>Build scalar property definitions for JSON Schema using individual inputs</sub> | JSON | ⚪ | 🟡 | 🟠 | 🟢 |
+| JSON Schema Property Object (JsonSchemaPropObj)<br><sub>Build object property definitions with sub-properties for JSON Schema</sub> | JSON | ⚪ | 🟡 | 🟠 | 🟢 |
+| JSON Schema Property Array (JsonSchemaPropArr)<br><sub>Build array property definitions with configurable item type for JSON Schema</sub> | JSON | ⚪ | 🟡 | 🟠 | 🟢 |
+| JSON Object (JsonObject)<br><sub>Create a JSON object from key-value pairs with auto-coerced values</sub> | JSON | ⚪ | 🟡 | 🟠 | 🟢 |
+| JSON Array (JsonArray)<br><sub>Create a JSON array from a list of items with auto-coerced values</sub> | JSON | ⚪ | 🟡 | 🟠 | 🟢 |
+| JSON Array To Text List (JsonArray2Text)<br><sub>Parse a JSON array string into a Grasshopper text list</sub> | JSON | ⚪ | 🟡 | 🟠 | 🟢 |
+| JSON To Text (Json2Text)<br><sub>Serialize a JSON value to a string with optional pretty-print</sub> | JSON | ⚪ | 🟡 | 🟠 | 🟢 |
+| JSON Get Value (JsonGetValue)<br><sub>Extract a nested value from JSON using dot-notation path</sub> | JSON | ⚪ | 🟡 | 🟠 | 🟢 |
+| JSON Merge (JsonMerge)<br><sub>Merge multiple JSON objects via shallow merge (last-wins)</sub> | JSON | ⚪ | 🟡 | 🟠 | 🟢 |
+| Audio Viewer (AudioViewer)<br><sub>Play and inspect audio on the canvas</sub> | Audio | ⚪ | 🟡 | 🟠 | 🟢 |
+| Audio To AI (Audio2AI)<br><sub>Package audio files or recording buffers for speech-to-text or multimodal AI</sub> | Input | ⚪ | 🟡 | 🟠 | 🟢 |
+| AI To Speech (AI2Speech)<br><sub>Convert AI-generated text or prompts into spoken audio</sub> | Output | ⚪ | 🟡 | 🟠 | 🟢 |
+| Combine Metrics (CombineMetrics)<br><sub>Aggregate usage metrics across multiple components</sub> | Misc | ⚪ | 🟡 | 🟠 | 🟢 |
 
 ### AI Tools
 
@@ -145,9 +156,18 @@ in the AI Chat component.
 | `gh_get_end_with_data` | Components | Read end nodes (data sinks) WITH their runtime data. Use this to inspect the final computed outputs of the definition. Returns GhJSON with 'runtimeData'. This is token-expansive! | ⚪ | 🟡 | 🟠 | 🟢 |
 | `gh_put` | Components | Add new components to the canvas from GhJSON format. Use this to create component networks, add missing components, or build parametric definitions. The GhJSON must include component types, positions, and connections. | ⚪ | 🟡 | 🟠 | 🟢 |
 | `gh_merge` | Components | Merge two GhJSON documents into one. The target document takes priority on conflicts (duplicate components by GUID are skipped from source). Connections and groups from both documents are combined with proper ID remapping and deduplication. | ⚪ | 🟡 | 🟠 | 🟢 |
-| `gh_diff` | Components | Diff two GhJSON documents and produce a structured `.ghpatch` document describing the differences (added/removed/modified components, connections, groups, and metadata). Components are matched by instanceGuid, then id, then structural fingerprint (componentGuid + name + optional pivot). Connections are matched by their endpoints (paramName preferred, paramIndex fallback). By default, runtime messages, metadata counters and metadata timestamps are ignored. | ⚪ | 🟡 | - | - |
-| `gh_patch_apply` | Components | Apply a `.ghpatch` patch document to a base GhJSON document. Components are matched by instanceGuid, then id, then structural fingerprint. By default, the patch's recorded base checksum is verified against the supplied base document — on mismatch, the apply is refused (no partial application). Conflicts (match not found, connection already present, dangling group members, ...) are recorded in the result. | - | - | - | - |
-| `gh_patch_validate` | Components | Structurally validate a `.ghpatch` document. Checks the patch kind, that components/groups in remove/modify ops carry at least one identity field, and that connections have valid endpoints. | ⚪ | 🟡 | - | - |
+| `gh_diff` | Components | Diff two GhJSON documents and produce a structured `.ghpatch` document describing the differences (added/removed/modified components, connections, groups, and metadata). Components are matched by instanceGuid, then id, then structural fingerprint (componentGuid + name + optional pivot). Connections are matched by their endpoints (paramName preferred, paramIndex fallback). By default, runtime messages, metadata counters and metadata timestamps are ignored. | ⚪ | 🟡 | 🟠 | 🟢 |
+| `gh_patch_apply` | Components | Apply a `.ghpatch` patch document to a base GhJSON document. Components are matched by instanceGuid, then id, then structural fingerprint. By default, the patch's recorded base checksum is verified against the supplied base document — on mismatch, the apply is refused (no partial application). Conflicts (match not found, connection already present, dangling group members, ...) are recorded in the result. | ⚪ | 🟡 | 🟠 | 🟢 |
+| `gh_patch_validate` | Components | Structurally validate a `.ghpatch` document. Checks the patch kind, that components/groups in remove/modify ops carry at least one identity field, and that connections have valid endpoints. | ⚪ | 🟡 | 🟠 | 🟢 |
+| `gh_set_value` | Components | Edits supported existing value holders (Number Sliders, Panels, Boolean Toggles) or persistent parameters with preview and review. | ⚪ | 🟡 | 🟠 | 🟢 |
+| `gh_run` | Components | Runs/recomputes specified components on the canvas with solution safety checks and execution reporting. | ⚪ | 🟡 | 🟠 | 🟢 |
+| `canvas_screenshot` | ImageProcessing | Captures high-resolution canvas screenshots with optional crop and object selection overlay for vision AI reasoning. | ⚪ | 🟡 | 🟠 | 🟢 |
+| `viewport_screenshot` | ImageProcessing | Captures Rhino viewport screenshots with camera projection, active view, and units metadata for spatial AI reasoning. | ⚪ | 🟡 | 🟠 | 🟢 |
+| `gh_document_list` | Document | Lists open Grasshopper documents with IDs, file paths, active state, and modification status. | ⚪ | 🟡 | 🟠 | 🟢 |
+| `gh_document_switch` | Document | Switches the active Grasshopper document by document ID with explicit user confirmation. | ⚪ | 🟡 | 🟠 | 🟢 |
+| `gh_document_new` | Document | Creates a new empty Grasshopper document with user confirmation. | ⚪ | 🟡 | 🟠 | 🟢 |
+| `gh_document_open` | Document | Opens an existing Grasshopper definition from file path with user confirmation. | ⚪ | 🟡 | 🟠 | 🟢 |
+| `gh_document_read` | Document | Reads an open document's structure by document ID with pagination and optional internalized data. | ⚪ | 🟡 | 🟠 | 🟢 |
 | `gh_component_toggle_preview` | Components | Show or hide component geometry preview in the Rhino viewport. Hiding preview improves performance for complex definitions. Only affects components that generate geometry. Requires component GUIDs from gh_get. | ⚪ | 🟡 | 🟠 | 🟢 |
 | `gh_component_hide_preview_selected` | Components | Hide geometry preview for currently selected components. Quick way to hide preview for selected items without needing to specify GUIDs manually. Improves performance for complex definitions. | ⚪ | 🟡 | 🟠 | 🟢 |
 | `gh_component_show_preview_selected` | Components | Show geometry preview for currently selected components. Quick way to enable preview for selected items without needing to specify GUIDs manually. | ⚪ | 🟡 | 🟠 | 🟢 |
@@ -181,8 +201,10 @@ in the AI Chat component.
 | `script_parameter_set_optional` | NotTested | Set whether a script input parameter is required or optional | ⚪ | 🟡 | - | - |
 | `speech_generate` | Speech | Generates speech audio from text input | - | - | - | - |
 | `button_click` | Components | Simulate a momentary click on Grasshopper Buttons (not Boolean Toggles). The button is pressed for 100 ms, then released. Provide the instance GUIDs of the buttons. | - | - | - | - |
-| `gh_document_save` | Document | Save the current Grasshopper document. If no filePath is provided, the document is saved to its existing location. Provide a full file path to save a copy or unnamed document. | - | - | - | - |
-| `gh_remove` | Components | Remove components from the Grasshopper canvas by their instance GUIDs. The operation records an undo event so the user can reverse it with Ctrl+Z. Use GUIDs from gh_get or similar tools. | - | - | - | - |
+| `gh_document_save` | Document | Save the current Grasshopper document. Supports explicit target documentId and destination confirmation. | ⚪ | 🟡 | 🟠 | 🟢 |
+| `gh_remove` | Components | Remove components from the Grasshopper canvas by their instance GUIDs with review consent and Undo grouping. | ⚪ | 🟡 | 🟠 | 🟢 |
+| `plan_propose` | Planning | Proposes a structured multi-step execution plan to the user in chat for approval before proceeding. | ⚪ | 🟡 | 🟠 | 🟢 |
+| `plan_tasks` | Planning | Updates task progress and states (pending, in_progress, completed, failed) on an active execution plan. | ⚪ | 🟡 | 🟠 | 🟢 |
 
 Notes:
 

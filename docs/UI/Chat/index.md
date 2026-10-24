@@ -9,8 +9,8 @@ Chat UI architecture and interactions after migrating to a fully WebView-based i
 | Property | Value |
 | --- | --- |
 | **Source Code** | `src/SmartHopper.Core.Grasshopper/UI/Chat/` |
-| **Since Version** | ? |
-| **Last Updated** | 2026-06-14 |
+| **Since Version** | 2.0.0 |
+| **Last Updated** | 2026-10-24 |
 | **Documentation Maintainer** | Devin AI |
 
 _Note: This documentation was written by AI on its own. It may contain some mistakes. If you would like to help, read this documentation and delete this comment if everything is okay._
@@ -41,6 +41,23 @@ User actions originate in the WebView's JavaScript and are bridged to C# via a *
 - Clipboard helper: `clipboard://copy?text=...`
 
 C# intercepts these URLs using `WebView.DocumentLoading` and cancels navigation, then routes the action to the appropriate host method.
+
+### Security and Sanitization
+
+- **HTML Sanitization**: All rendered message contents are sanitized using embedded local DOMPurify (`purify.min.js`, licensed under Apache 2.0 and MPL 2.0) before insertion into the WebView DOM, protecting against XSS or arbitrary script injection.
+- **Navigation Policy**: `ChatNavigationPolicy` strictly restricts WebView navigation to internal custom schemes (`sh:`, `clipboard:`), rejecting navigation to external web protocols or unauthorized origins.
+
+### Task Planning and Progress
+
+- **Plan Cards**: `WebChatTaskPlan` models multi-step execution plans proposed via `plan_propose`.
+- **Progress Tracking**: Real-time progress updates are surfaced via `plan_tasks` with step-by-step task status cards.
+- **Consent Gates**: Plan approval is kept distinct from concrete Canvas mutation consent.
+
+### Execution Budgets and Document Tracking
+
+- **Run Budgets**: Runs are bounded by per-request time (default 300 seconds) and token limits (default 100,000 tokens), preventing runaway calls and displaying token and time metrics.
+- **Document Tracking**: `ChatDocumentTracking` binds mutations to the active Grasshopper document. Structural edits and document switching between requests are tracked using per-chat baselines via `ChatCanvasBaselineStore`.
+- **Visual Context**: `CanvasVisualContextProviders` integrates canvas and viewport screenshots (`canvas_screenshot`, `viewport_screenshot`), rendering bounded image attachments directly in conversation bubbles.
 
 ### Clipboard
 
@@ -216,9 +233,11 @@ These changes also mitigate issue #261 ("ui eventually freezes on opening webcha
   - C# host: `src/SmartHopper.Core/UI/Chat/WebChatDialog.cs`
   - Observer: `src/SmartHopper.Core/UI/Chat/WebChatObserver.cs`
   - Rendering: `src/SmartHopper.Core/UI/Chat/HtmlChatRenderer.cs`
+  - Planning & Tracking: `src/SmartHopper.Core/UI/Chat/WebChatTaskPlan.cs`, `ChatDocumentTracking.cs`, `ChatNavigationPolicy.cs`
+  - Visual Context: `src/SmartHopper.Core/AIContext/CanvasVisualContextProviders.cs`
   - Resources: `src/SmartHopper.Core/UI/Chat/Resources/`
     - CSS: `css/chat-styles.css`
-    - JS: `js/chat-script.js`
+    - JS: `js/chat-script.js`, `js/purify.min.js`
     - HTML templates: `templates/chat-template.html`, `templates/message-template.html`, `templates/error-template.html`
   - Conversation/session: `src/SmartHopper.Infrastructure/AICall/Sessions/ConversationSession.cs`
   - Utilities/lifecycle: `src/SmartHopper.Core/UI/Chat/WebChatUtils.cs`
